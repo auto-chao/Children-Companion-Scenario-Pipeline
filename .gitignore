@@ -1,0 +1,24 @@
+# Downloaded model weights (use scripts/bootstrap_assets.py locally)
+artifacts/
+
+# ClearerVoice: training/eval data includes Windows-reserved filenames (e.g. aux.scp) that break `git add` on Windows; not required for inference (see clearvoice/)
+vendor/ClearerVoice-Studio/train/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Env
+.env
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/

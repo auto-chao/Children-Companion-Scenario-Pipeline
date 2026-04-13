@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools==81.0.0", "wheel==0.46.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ccs-audio-pipeline"
+version = "0.1.0"
+description = "Child speech segment extraction and multi-turn manifest builder."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [
+  { name = "ccs team" }
+]
+dependencies = [
+  "numpy==2.2.6",
+  "scipy==1.15.1",
+  "librosa==0.10.2.post1",
+  "soundfile==0.13.1",
+  "numba==0.61.2",
+  "llvmlite==0.44.0",
+  "scikit-learn==1.6.1",
+  "sentence-transformers==3.0.1",
+  "networkx==3.3",
+  "tqdm==4.67.1",
+  "transformers==4.44.2",
+  "torch==2.8.0",
+  "torchaudio==2.8.0",
+  "pyannote.audio==4.0.1",
+  "demucs==4.0.1",
+  "huggingface-hub==0.28.1",
+  "onnxruntime==1.24.4",
+  "kaldiio==2.18.1",
+  "kaldi_native_fbank==1.22.3",
+  "sentencepiece==0.2.1",
+  "imageio-ffmpeg==0.6.0",
+  "protobuf==6.33.5",
+  "pydub==0.25.1",
+  "rotary-embedding-torch==0.8.3",
+  "torchinfo==1.8.0",
+  "yamlargparse==1.31.1"
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff==0.6.4"
+]
+
+[project.scripts]
+build-child-dataset = "ccs_audio_pipeline.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
