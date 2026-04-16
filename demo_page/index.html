@@ -4,13 +4,50 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>儿童陪伴 Demo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['"Noto Sans SC"', 'system-ui', 'sans-serif'] },
+          colors: {
+            surface: { DEFAULT: 'rgba(15, 23, 42, 0.72)', raised: 'rgba(30, 41, 59, 0.55)' },
+          },
+          boxShadow: {
+            glow: '0 0 0 1px rgba(148, 163, 184, 0.08), 0 25px 50px -12px rgba(0, 0, 0, 0.45)',
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    .audio-skin audio { height: 2.5rem; border-radius: 0.75rem; }
+    .grain {
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    }
+  </style>
 </head>
-<body class="min-h-screen bg-slate-950 text-slate-100">
-  <div class="max-w-3xl mx-auto px-4 py-8">
-    <header class="mb-8">
-      <h1 class="text-2xl font-bold text-white tracking-tight">儿童语音 · 助手回复 · TTS</h1>
-      <p class="text-slate-400 text-sm mt-2">数据来源：<code class="text-cyan-400">outputs\assistant_responses_with_tts.jsonl</code></p>
+<body class="min-h-screen text-slate-100 antialiased grain" style="background: linear-gradient(165deg, #0c1222 0%, #111827 40%, #0f172a 100%);">
+  <div class="pointer-events-none fixed inset-0 overflow-hidden">
+    <div class="absolute -left-40 top-0 h-96 w-96 rounded-full bg-cyan-500/10 blur-[100px]"></div>
+    <div class="absolute -right-32 bottom-0 h-80 w-80 rounded-full bg-violet-600/10 blur-[90px]"></div>
+  </div>
+  <div class="relative mx-auto max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
+    <header class="mb-10 text-center sm:mb-12 sm:text-left">
+      <p class="mb-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-400/90">Companion · Voice · TTS</p>
+      <h1 class="bg-gradient-to-r from-white via-slate-100 to-slate-400 bg-clip-text text-3xl font-bold tracking-tight text-transparent sm:text-4xl">
+        儿童语音对照试听
+      </h1>
+      <p class="mx-auto mt-3 max-w-xl text-sm leading-relaxed text-slate-400 sm:mx-0">
+        下方为每条样本的模型回复与音频；请用本地 HTTP 打开页面以正常加载 <code class="rounded bg-slate-800/80 px-1.5 py-0.5 font-mono text-[11px] text-cyan-300/90">outputs/</code> 资源。
+      </p>
+      <p class="mt-4 inline-flex flex-wrap items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-400 backdrop-blur-sm">
+        <span class="text-slate-500">数据</span>
+        <code class="max-w-[min(100%,28rem)] truncate font-mono text-[11px] text-emerald-300/90">outputs\assistant_responses_with_tts.jsonl</code>
+      </p>
     </header>
     <div id="app" class="space-y-8"></div>
   </div>
@@ -48,71 +85,95 @@
       let mime = '';
       if (lower.endsWith('.m4a')) mime = 'audio/mp4';
       else if (lower.endsWith('.wav')) mime = 'audio/wav';
+      const base = 'class="h-10 w-full accent-cyan-500" controls preload="metadata"';
       if (mime) {
-        return '<audio class="w-full" controls preload="metadata">' +
+        return '<audio ' + base + '>' +
           '<source src="' + src + '" type="' + mime + '" /></audio>';
       }
-      return '<audio class="w-full" controls preload="metadata" src="' + src + '"></audio>';
+      return '<audio ' + base + ' src="' + src + '"></audio>';
     }
     const SAMPLES = JSON.parse(document.getElementById('payload-json').textContent);
     const app = document.getElementById('app');
+    if (!SAMPLES.length) {
+      app.innerHTML = '<div class="rounded-2xl border border-dashed border-white/15 bg-white/[0.03] p-12 text-center text-slate-500">' +
+        '<p class="text-sm">暂无样本，请先生成 JSONL 并重新运行 generate_demo_page.py</p></div>';
+    }
     SAMPLES.forEach((sample, si) => {
       const card = document.createElement('article');
-      card.className = 'rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl';
+      card.className = 'rounded-3xl border border-white/[0.08] bg-surface shadow-glow backdrop-blur-xl';
       const ml = sample.manifest_line != null ? sample.manifest_line : (si + 1);
       const badge = sample.dialog_type || '对话';
       const badgeCls = badge.indexOf('多轮') >= 0
-        ? 'bg-violet-500/20 text-violet-300'
-        : 'bg-emerald-500/20 text-emerald-300';
+        ? 'border-violet-500/30 bg-violet-500/15 text-violet-200'
+        : 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200';
       const ref = sample.recording_dialogue_ref || '';
       const refBlock = ref
-        ? '<div class="mb-4 rounded-lg border border-slate-700 bg-slate-900/60 p-3 text-xs text-slate-400 whitespace-pre-wrap">' +
-          '<div class="text-slate-500 mb-1">录音对话参考（manifest）</div>' +
-          esc(ref) +
-          '</div>'
+        ? '<details class="group mb-5 rounded-2xl border border-white/10 bg-black/20 open:bg-black/25">' +
+          '<summary class="cursor-pointer list-none px-4 py-3 text-sm font-medium text-slate-300 marker:content-none ' +
+          'after:ml-2 after:inline-block after:text-slate-500 after:transition group-open:after:rotate-90 after:content-['›']">' +
+          '<span class="text-cyan-400/90">录音对话参考</span>' +
+          '<span class="ml-2 text-xs font-normal text-slate-500">（manifest · 点击展开）</span></summary>' +
+          '<div class="border-t border-white/5 px-4 py-3 text-xs leading-relaxed text-slate-400 whitespace-pre-wrap">' +
+          esc(ref) + '</div></details>'
         : '';
       card.innerHTML =
-        '<div class="flex items-center justify-between gap-3 mb-4">' +
-        '<span class="text-lg font-semibold text-white">样本 #' + esc(String(ml)) + '</span>' +
-        '<span class="text-xs font-medium px-2 py-1 rounded-full ' + badgeCls + '">' + esc(badge) + '</span>' +
-        '</div>' +
-        refBlock +
-        '<div class="space-y-5 turns"></div>';
+        '<div class="flex flex-col gap-3 border-b border-white/5 px-5 pb-4 pt-5 sm:flex-row sm:items-center sm:justify-between">' +
+        '<div class="flex items-baseline gap-3">' +
+        '<span class="text-3xl font-bold tabular-nums text-white/90">#' + esc(String(ml)) + '</span>' +
+        '<span class="text-sm text-slate-500">样本</span></div>' +
+        '<span class="inline-flex w-fit items-center rounded-full border px-3 py-1 text-xs font-medium ' + badgeCls + '">' +
+        esc(badge) + '</span></div>' +
+        '<div class="px-5 pb-5">' + refBlock + '<div class="space-y-5 turns"></div></div>';
       const turnsEl = card.querySelector('.turns');
       (sample.turns || []).forEach((turn, ti) => {
         const turnIdx = turn.turn_index != null ? turn.turn_index : (ti + 1);
         const bubble = document.createElement('div');
-        bubble.className = 'rounded-xl border border-slate-700/80 bg-slate-800/50 p-4';
+        bubble.className = 'relative overflow-hidden rounded-2xl border border-white/[0.06] bg-surface-raised';
         const pt = turn.plain_text || '';
         const sem = turn.semantic_content || '';
         const ae = turn.acoustic_emotion || '';
         const childHref = turn.child_audio_href || '';
         const ttsHref = turn.tts_audio_href || '';
         const ttsErr = turn.tts_error || '';
-        let childBlock = '<p class="text-slate-500 text-sm">无音频路径</p>';
+        let childBlock = '<p class="py-2 text-center text-xs text-slate-500">无儿童音频路径</p>';
         if (childHref) {
-          childBlock = audioTagForHref(childHref);
+          childBlock = '<div class="audio-skin">' + audioTagForHref(childHref) + '</div>';
         }
-        let ttsBlock = '<p class="text-amber-200/80 text-sm">' +
-          (ttsErr ? ('TTS: ' + esc(ttsErr)) : '未生成 TTS') + '</p>';
+        let ttsBlock = '<p class="py-2 text-center text-xs text-amber-200/70">' +
+          (ttsErr ? ('TTS：' + esc(ttsErr)) : '尚未生成 TTS') + '</p>';
         if (ttsHref) {
-          ttsBlock = audioTagForHref(ttsHref);
+          ttsBlock = '<div class="audio-skin">' + audioTagForHref(ttsHref) + '</div>';
         }
-        const metaBits = [];
-        if (sem) metaBits.push('语义：' + esc(sem));
-        if (ae) metaBits.push('情绪：' + esc(ae));
-        const metaHtml = metaBits.length
-          ? '<div class="text-xs text-slate-500 mb-2 space-y-1">' + metaBits.join('<br/>') + '</div>'
+        const chips = [];
+        if (sem) {
+          chips.push('<span class="inline-flex max-w-full rounded-lg bg-cyan-950/50 px-2 py-1 text-[11px] leading-snug text-cyan-100/90 ring-1 ring-cyan-500/20">' +
+            '<span class="shrink-0 text-cyan-500/80">语义</span><span class="ml-1.5 text-slate-300">' + esc(sem) + '</span></span>');
+        }
+        if (ae) {
+          chips.push('<span class="inline-flex max-w-full rounded-lg bg-violet-950/40 px-2 py-1 text-[11px] leading-snug text-violet-100/90 ring-1 ring-violet-500/20">' +
+            '<span class="shrink-0 text-violet-400/80">声学</span><span class="ml-1.5 text-slate-300">' + esc(ae) + '</span></span>');
+        }
+        const chipsHtml = chips.length
+          ? '<div class="mb-3 flex flex-col gap-2 sm:flex-row sm:flex-wrap">' + chips.join('') + '</div>'
           : '';
         bubble.innerHTML =
-          '<div class="text-xs text-slate-500 mb-2">轮次 ' + esc(String(turnIdx)) + '</div>' +
-          metaHtml +
-          '<div class="prose prose-invert prose-sm max-w-none mb-4 whitespace-pre-wrap text-slate-200">' +
-          esc(pt) + '</div>' +
-          '<div class="grid sm:grid-cols-2 gap-4">' +
-          '<div><div class="text-xs font-medium text-slate-400 mb-1">儿童输入音频</div>' + childBlock + '</div>' +
-          '<div><div class="text-xs font-medium text-slate-400 mb-1">助手 TTS</div>' + ttsBlock + '</div>' +
-          '</div>';
+          '<div class="absolute left-0 top-0 h-full w-1 bg-gradient-to-b from-cyan-400/80 to-violet-500/60"></div>' +
+          '<div class="pl-5 pr-4 pb-4 pt-4 sm:pl-6">' +
+          '<div class="mb-3 flex items-center gap-2">' +
+          '<span class="flex h-7 w-7 items-center justify-center rounded-lg bg-white/10 text-xs font-semibold text-white">' +
+          esc(String(turnIdx)) + '</span>' +
+          '<span class="text-xs font-medium uppercase tracking-wider text-slate-500">Turn</span></div>' +
+          chipsHtml +
+          '<blockquote class="mb-5 border-l-2 border-cyan-400/40 pl-4 text-[15px] font-medium leading-relaxed text-slate-100">' +
+          esc(pt) + '</blockquote>' +
+          '<div class="grid gap-4 sm:grid-cols-2">' +
+          '<div class="rounded-xl bg-black/25 p-3 ring-1 ring-white/5">' +
+          '<div class="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">' +
+          '<span class="h-1.5 w-1.5 rounded-full bg-cyan-400"></span>儿童原声</div>' + childBlock + '</div>' +
+          '<div class="rounded-xl bg-black/25 p-3 ring-1 ring-white/5">' +
+          '<div class="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">' +
+          '<span class="h-1.5 w-1.5 rounded-full bg-violet-400"></span>助手 TTS</div>' + ttsBlock + '</div>' +
+          '</div></div>';
         turnsEl.appendChild(bubble);
       });
       app.appendChild(card);
