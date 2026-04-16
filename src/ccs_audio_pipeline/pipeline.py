@@ -272,6 +272,24 @@ def run_pipeline() -> None:
     parser.add_argument("--multi-link-threshold", type=float, default=0.7)
     parser.add_argument("--max-turns", type=int, default=6)
     parser.add_argument(
+        "--gap-asr-min-sec",
+        type=float,
+        default=0.35,
+        help="儿童片段之间或片尾留白达到该时长才做大人语音 ASR（秒）。",
+    )
+    parser.add_argument(
+        "--gap-asr-max-sec",
+        type=float,
+        default=45.0,
+        help="相邻两轮儿童语音之间、单次大人 ASR 的最长截取（秒）。",
+    )
+    parser.add_argument(
+        "--suffix-asr-max-sec",
+        type=float,
+        default=45.0,
+        help="最后一轮儿童之后、单次大人 ASR 的最长截取（秒）。",
+    )
+    parser.add_argument(
         "--trace-dir",
         type=Path,
         default=None,
@@ -330,9 +348,11 @@ def run_pipeline() -> None:
     )
 
     all_segments: list[Segment] = []
+    audio_waveforms: dict[str, tuple[np.ndarray, int]] = {}
     for audio_path in tqdm(audio_files, desc="Processing files"):
         audio_id = audio_path.stem
         waveform, sr = load_audio_mono(audio_path, args.sample_rate)
+        audio_waveforms[audio_id] = (waveform, sr)
 
         foreground_view = dialogue_frontend.build_foreground_dialogue_view(audio_path)
         turn_waveform = foreground_view.enhanced_view.waveform
@@ -522,7 +542,15 @@ def run_pipeline() -> None:
     if trace_paths:
         write_dialog_trace(trace_paths.dialogs_jsonl, dialogs)
         write_trace_summary(trace_paths, summary)
-    write_manifest(manifest_path, dialogs)
+    write_manifest(
+        manifest_path,
+        dialogs,
+        audio_waveforms,
+        asr,
+        gap_min_sec=args.gap_asr_min_sec,
+        gap_max_sec=args.gap_asr_max_sec,
+        suffix_max_sec=args.suffix_asr_max_sec,
+    )
     print(f"Done: {manifest_path}")
     print(f"Done: {audios_dir}")
     if trace_paths:
@@ -815,19 +843,100 @@ def chunk_list(items: list[Segment], size: int) -> list[list[Segment]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def write_manifest(path: Path, dialogs: list[list[Segment]]) -> None:
+def _transcribe_waveform_interval(
+    waveform: np.ndarray,
+    sr: int,
+    t_start: float,
+    t_end: float,
+    asr: Any,
+    *,
+    min_sec: float,
+    max_sec: float,
+) -> str:
+    """在 [t_start, t_end] 上切片并 ASR；过短则返回空串；时长超过 max_sec 则截断。"""
+    if sr <= 0:
+        return ""
+    span = max(0.0, t_end - t_start)
+    if span < min_sec:
+        return ""
+    t1 = min(t_end, t_start + max_sec)
+    s_idx = max(0, int(t_start * sr))
+    e_idx = min(len(waveform), int(t1 * sr))
+    if e_idx <= s_idx:
+        return ""
+    clip = waveform[s_idx:e_idx]
+    if len(clip) / sr < min_sec:
+        return ""
+    return str(asr.transcribe(clip, sr)).strip()
+
+
+def write_manifest(
+    path: Path,
+    dialogs: list[list[Segment]],
+    audio_waveforms: dict[str, tuple[np.ndarray, int]],
+    asr: Any,
+    *,
+    gap_min_sec: float,
+    gap_max_sec: float,
+    suffix_max_sec: float,
+) -> None:
+    """写入 manifest；assistant 槽位为相邻两轮儿童语音之间（或片尾）的大人语音 ASR。"""
     with path.open("w", encoding="utf-8") as f:
         for dialog in dialogs:
+            if not dialog:
+                continue
+            audio_id = dialog[0].audio_id
+            cached = audio_waveforms.get(audio_id)
+            if cached is None:
+                raise RuntimeError(f"Missing waveform cache for audio_id={audio_id!r}")
+            waveform, sr = cached
+            dur_sec = float(len(waveform)) / float(sr) if sr else 0.0
+
             line: dict[str, Any] = {"messages": []}
+
+            prefix = _transcribe_waveform_interval(
+                waveform,
+                sr,
+                0.0,
+                dialog[0].start,
+                asr,
+                min_sec=gap_min_sec,
+                max_sec=gap_max_sec,
+            )
+            if prefix:
+                line["recording_prefix_adult"] = prefix
+
             for i, seg in enumerate(dialog, start=1):
                 user_key = "user" if i == 1 else f"user_{i}"
                 assistant_key = "assistant" if i == 1 else f"assistant_{i}"
                 audio_key = "audio" if i == 1 else f"audio_{i}"
 
                 line[user_key] = seg.transcript
-                line[assistant_key] = ""
                 line[audio_key] = str(seg.clip_path).replace("\\", "/")
+
+                if i < len(dialog):
+                    nxt = dialog[i]
+                    assistant_text = _transcribe_waveform_interval(
+                        waveform,
+                        sr,
+                        seg.end,
+                        nxt.start,
+                        asr,
+                        min_sec=gap_min_sec,
+                        max_sec=gap_max_sec,
+                    )
+                else:
+                    assistant_text = _transcribe_waveform_interval(
+                        waveform,
+                        sr,
+                        seg.end,
+                        dur_sec,
+                        asr,
+                        min_sec=gap_min_sec,
+                        max_sec=suffix_max_sec,
+                    )
+                line[assistant_key] = assistant_text
                 line["messages"].append({"role": "user", "text": seg.transcript})
-                line["messages"].append({"role": "assistant", "text": ""})
+                line["messages"].append({"role": "assistant", "text": assistant_text})
 
             f.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")

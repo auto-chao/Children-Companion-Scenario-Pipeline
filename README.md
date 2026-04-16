@@ -1,11 +1,17 @@
-# 儿童语音数据集构建器
+# 儿童陪伴场景 · 语音数据集与对话 Demo
 
-从 `data/audio/` 下的 `m4a` 音频中抽取**儿童说话片段**，并判定片段能否组成**单轮或多轮 user query**，最终导出 **`manifest.jsonl` + `audios/`**。  
-Pipeline 为固定单路径、可离线运行（依赖与权重预先准备）；**时间边界来自「Demucs → ClearerVoice 前端增强后的 pyannote 说话人 turn」**。
+从原始亲子对话音频中抽取**儿童说话片段**，构建 **manifest**，再经第三方多模态 API 生成**陪伴式回复**，并用 **CosyVoice** 合成语音，最后在浏览器中查看 **静态 Demo 页**。  
+主要产物在运行后生成于 `outputs/`（clone 后可能为空，属正常）。
 
-## Quick Start
+## 你需要准备什么
 
-### 1. 环境准备
+- **操作系统**：Linux / macOS / Windows（脚本示例以 **Git Bash** 为准）。
+- **Python**：3.10+，推荐使用 **conda** 环境（下文以 `ccs` 为例）。
+- **ffmpeg**：系统可执行文件在 `PATH` 中。
+- **NVIDIA GPU**：强烈推荐（数据集与 TTS 均会快很多）；CPU 也可跑，见下文 TTS 说明。
+- **网络**：首次下载模型权重、克隆 CosyVoice、调用助手 API 时需要。
+
+## 安装
 
 ```bash
 conda activate ccs
@@ -13,118 +19,121 @@ pip install -r constraints.txt
 pip install -e .
 ```
 
-**NVIDIA GPU（推荐）**：默认 PyPI 上的 `torch` 多为 CPU 版。安装完依赖后请再装 **CUDA 版**（与项目 `torch==2.8.0` 一致）。**RTX 50 / Blackwell（如 RTX 5070，sm_120）需 CUDA 12.8 构建**，不要用 `cu126`：
+**CUDA 版 PyTorch**（与 `constraints.txt` 中版本一致；新显卡请按 [PyTorch 官网](https://pytorch.org/) 选择对应 cu 版本）示例：
 
 ```bash
 pip install --upgrade "torch==2.8.0" "torchaudio==2.8.0" --index-url https://download.pytorch.org/whl/cu128
-pip install "networkx==3.3"
 ```
 
-第二条用于把可能被上述安装抬升的 `networkx` 固定回与本项目 `constraints.txt` 一致。
+使用 **pyannote** 等模型前，请在 Hugging Face 网页上接受对应模型的使用条款。
 
-**前提**：系统可调用 `ffmpeg`；首次下载资产时需能访问 Hugging Face / GitHub；使用 **pyannote** 前请在 Hugging Face 网页上**接受对应模型条款**。
-
-### 2. 一次性下载离线资产
+## 首次下载离线资产
 
 ```bash
 conda activate ccs
-export HF_TOKEN=你的_hf_token
+export HF_TOKEN=你的_huggingface_token
 python scripts/bootstrap_assets.py --hf-token "$HF_TOKEN"
 ```
 
-（Windows PowerShell 可将 `export` 换为 `$env:HF_TOKEN="..."` 后同样传入 `--hf-token`。）
-
-下载完成后典型目录包括：`artifacts/models/` 下各模型权重、`vendor/ClearerVoice-Studio/`、`vendor/FireRedASR/` 等。检查是否齐全：
+检查：
 
 ```bash
 python scripts/bootstrap_assets.py --check-only
 ```
 
-### 3. 运行
+## 一键跑全流程
 
-推荐使用 **Git Bash**：
+将示例音频放在 `data/audio/`（默认使用其中的 `*.m4a`）。设置**第三方 Gemini 兼容代理**的密钥（由你的代理服务商提供，不是 Google AI Studio 官方 key）：
 
 ```bash
 conda activate ccs
-sh main.sh
+export GEMINI_PROXY_API_KEY=你的代理密钥
+export HF_TOKEN=你的_huggingface_token   # 若尚未 bootstrap 或需首次部署 CosyVoice
+export ASSISTANT_WORKERS=4               # 第3步并行 worker（默认 4，可按配额调小）
+bash main.sh
 ```
 
-`main.sh` 在资产缺失时会提示先执行 bootstrap；成功时等价于执行：
+`main.sh` 会依次：检查离线资产 → 构建儿童数据集 → 生成助手回复 →（若尚无 CosyVoice 虚拟环境则）运行 `scripts/deploy_cosyvoice.py` → TTS → 生成 `demo_page/index.html`。
+
+**仅构建数据集、不调用助手 API**时，可执行：
 
 ```bash
-python scripts/build_dataset.py \
-  --input-dir data/audio \
-  --output-dir outputs/child_dataset \
-  --seed 20260409 \
-  --num-threads 8 \
-  --min-turn-sec 0.35 \
-  --turn-merge-gap-sec 0.35 \
-  --turn-glitch-max-sec 0.25 \
-  --turn-glitch-gap-sec 0.2 \
-  --child-threshold 0.6 \
-  --max-gap-seconds 30 \
-  --multi-link-threshold 0.7 \
-  --max-turns 6 \
-  --trace-dir outputs/child_dataset/trace
+bash build_child_dataset.sh
 ```
 
-### 4. 输出
+## 输出在哪里
 
-- `outputs/child_dataset/manifest.jsonl`：每行一条单轮或多轮对话样本（`assistant` 字段默认可留空，便于后续补全）
-- `outputs/child_dataset/audios/*.m4a`：对应切片音频
-- `outputs/child_dataset/trace/`（与 pipeline 步骤一致，便于回溯）：
-  - `00_input_files.jsonl`：输入文件元信息
-  - `01_frontend_views.jsonl`：Demucs / ClearerVoice 视图摘要
-  - `02_pyannote_raw_turns.jsonl`：pyannote 原始 turn
-  - `03_turn_cleanup.jsonl`：固定规则清洗记录
-  - `04_diarization_projection.jsonl`：清洗后的候选时间范围与说话人
-  - `05_diarization_rttm/*.rttm`：对应 diarization 的 RTTM
-  - `06_child_scores.jsonl`：儿童判定分数与阈值门控
-  - `07_asr_segments.jsonl`：ASR 转写结果
-  - `08_link_scores.jsonl`：多轮链接分数
-  - `09_dialogs.jsonl`：对话链
-  - `summary.json`：汇总统计
+| 路径 | 说明 |
+|------|------|
+| `outputs/child_dataset/manifest.jsonl` | 多轮对话样本；除儿童片段 ASR（`user`/`user_*`）外，含相邻两轮之间（及片尾）**家长说话 ASR**（`assistant`/`assistant_*`），可选片头 `recording_prefix_adult` |
+| `outputs/child_dataset/audios/*.m4a` | 儿童片段音频 |
+| `outputs/assistant_responses_multiturn.jsonl` | 助手回复（含 `plain_text`、`semantic_content`、`acoustic_emotion`；多轮时历史轮以文本摘要注入，并含 `recording_dialogue_ref` 录音参考块） |
+| `outputs/tts_generated/*.wav` | 合成语音 |
+| `outputs/assistant_responses_with_tts.jsonl` | 带 `tts_audio` 路径的汇总 |
+| `demo_page/index.html` | 浏览器对照收听；**推荐**用 `bash demo_page/local_http.sh start` 起本地 HTTP 后打开提示的 URL（`file://` 直接打开可能无法播放音频）。`local_http.sh` 会自动探测 `PYTHON` / `python3` / `py`（含真实 `sys.executable`）/ `python`（跳过 Windows Store 占位），必要时用 `where.exe` 与 cmd 侧 PATH 对齐；仍失败可设置 `PYTHON` |
 
-## 输入与输出格式
+## TTS：GPU 与 CPU
 
-- **输入**：`--input-dir` 下的 `*.m4a`（默认示例为 `data/audio/`）。
-- **manifest 示例**（字段随多轮扩展）：
+- **默认**：`run_tts.sh` / `main.sh` 中的 TTS 在可用时使用 **GPU**（不设置 `CUDA_VISIBLE_DEVICES`）。
+- **RTX 50 系列（sm_120）建议**：先在 CosyVoice venv 里升级 GPU 版 torch（脚本已内置）：
 
-```json
-{
-  "user": "...",
-  "assistant": "",
-  "audio": "audios/xxx.m4a",
-  "user_2": "...",
-  "assistant_2": "",
-  "audio_2": "audios/yyy.m4a",
-  "messages": [
-    {"role": "user", "text": "..."},
-    {"role": "assistant", "text": ""}
-  ]
-}
+```bash
+python scripts/deploy_cosyvoice.py --skip-clone --skip-download
 ```
 
-**说明**：`audios/` 中仅包含 `p_child >= child_threshold` 的切片；**`manifest.jsonl` 行数**由多轮链接（`multi_link_threshold`、`max_gap_seconds`、`max_turns` 等）决定，故**音频文件数**与 **manifest 行数**可能不一致（例如多条切片合并为一轮对话）。
+- **强制 CPU**（无 NVIDIA 驱动、或需避免 GPU 时）：
 
-## Pipeline 逻辑图
+```bash
+COSYVOICE_FORCE_CPU=1 bash main.sh
+# 或
+COSYVOICE_FORCE_CPU=1 bash run_tts.sh
+```
 
-下图节点采用 **「中文功能：模型或模块名」**；运行期读取本地权重与 vendor 代码，不再在线拉取。
+PowerShell 写法：
+
+```powershell
+$env:COSYVOICE_FORCE_CPU="1"; bash .\run_tts.sh
+```
+
+CosyVoice 使用独立虚拟环境 `artifacts/cosyvoice/.venv`（由 `deploy_cosyvoice.py` 创建）。若整机拷贝仓库到新机器，建议在新环境中重新执行 `python scripts/deploy_cosyvoice.py` 以重建 venv。
+
+**合成逻辑**：CosyVoice 每轮仅朗读 JSON 中的 **`plain_text`**（zero-shot，需参考音频与 prompt；见 `run_tts.sh` / `batch_cosyvoice_tts.py`）。
+
+## 流水线概览
+
+下图给出端到端技术路线：**模块 1** 从原始对话音频得到儿童片段与对话 manifest；**模块 2** 先在**离线研究阶段**通过豆包听评迭代 Prompt，定稿后再做**批量多模态推理**写出结构化回复；**模块 3** 将文本合成为语音并用于 **Demo**。豆包参与的一环为研究/手工 Prompt 工程，**未**在 `main.sh` 中自动化；全量跑通仓库流水线可使用上文「一键跑全流程」中的 `bash main.sh`。
 
 ```mermaid
-flowchart TD
-  A[原始音频输入] --> B[背景音乐抑制：Demucs htdemucs_ft]
-  B --> C[前景语音增强：ClearerVoice MossFormer2_SE_48K]
-  C --> D[说话人分段：pyannote speaker-diarization-community-1]
-  D --> E[固定规则清洗：合并同说话人 / 吸收短毛刺 / 长度过滤与切分]
-  E --> F[儿童声音判定：audeering wav2vec2-large-robust-24-ft-age-gender]
-  F --> G[转写：FireRedASR-AED-L]
-  G --> H[多轮语义链接：BAAI/bge-m3]
-  H --> I[数据集导出：manifest.jsonl + audios]
+flowchart TB
+  subgraph mod_seg [模块1：语音切分与数据集]
+    s1[亲子对话音频] --> s2[儿童片段与对话 manifest]
+  end
+
+  subgraph mod_resp [模块2：陪伴式回复构建]
+    subgraph loop_doubao [离线研究：豆包参与 Prompt 迭代]
+      r1[设计初始 Prompt] --> r2[多模态生成回复]
+      r2 --> r3[试听儿童与助手语音]
+      r3 --> r4[豆包评判与优化建议]
+      r4 --> r5{满意?}
+      r5 -->|否| r6[据建议修订 Prompt]
+      r6 --> r2
+      r5 -->|是| r7[Prompt 定稿]
+    end
+    r7 --> r8[批量多模态 API 推理]
+  end
+
+  subgraph mod_tts [模块3：语音合成]
+    t1[朗读 plain_text] --> t2[合成语音]
+  end
+
+  s2 --> r8
+  r8 --> t1
+  t2 --> d1[静态 Demo 页]
+
 ```
 
-## 注意事项
+更细的**声学处理链路**（分离增强、说话人分割、ASR、多轮链接等）见源码包 `ccs_audio_pipeline`。
 
-- **第三方模型**：Demucs、pyannote、audeering、FireRedASR、ClearerVoice、BGE 等各有原始许可证与使用条款，用于研究或产品前请自行核对。
-- **阈值**：`--child-threshold`（默认 `0.6`）为唯一儿童判定门控；仅当 `p_child` 不低于该值时才做 ASR、导出切片并参与多轮链接。
-- **GPU 加速**：请安装带 CUDA 的 PyTorch，并保证 NVIDIA 驱动可用；默认会尽量将 **pyannote**、**Demucs**、**儿童判定**、**BGE**、**FireRedASR** 等放在 GPU 上，并启用 cuDNN autotune / TF32 以提升吞吐。若 `torch.cuda.is_available()` 为 false（例如只装了 CPU 版 torch），则整体仍在 CPU 上运行，速度会明显偏慢。调试可用 `--no-gpu-fast` 关闭上述 CUDA 吞吐优化（pyannote 将留在 CPU）。
+## 第三方模型与许可
+
+本仓库代码以 **Apache-2.0** 发布（见 [`LICENSE`](LICENSE)）。依赖的 **Demucs、pyannote、CosyVoice、FireRedASR、Sentence-Transformers、BGE** 等第三方权重各有原始许可证与条款；用于研究或产品前请自行阅读并遵守。生成内容不代表任何机构观点。

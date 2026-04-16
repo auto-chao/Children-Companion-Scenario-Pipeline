@@ -1,31 +1,67 @@
 #!/usr/bin/env bash
+# 仓库根目录一键端到端流水线（Git Bash / WSL / Linux / macOS）
+# 1) 离线资产检查  2) 儿童数据集  3) 助手回复  4) CosyVoice（按需部署） 5) TTS  6) Demo 页
+#
+# 使用前请激活与本项目一致的 conda 环境（如 ccs），并设置：
+#   GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY（助手步骤）
+#   HF_TOKEN（若需首次 bootstrap 或首次部署 CosyVoice 拉权重）
+# TTS 默认用 GPU；仅 CPU 推理： COSYVOICE_FORCE_CPU=1 ./main.sh
+#
+# 可选维护者环境变量（一般不用于日常）：
+#   PYTHON=python3   MAIN_SKIP_ASSISTANT=1   MAIN_SKIP_TTS=1   ASSISTANT_WORKERS=4
 
-set -eu
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
 
-OUTPUT_DIR="outputs/child_dataset"
-TRACE_DIR="${OUTPUT_DIR}/trace"
+set -euo pipefail
 
-if ! python scripts/bootstrap_assets.py --check-only >/dev/null 2>&1; then
-  echo "Offline assets are missing."
-  echo "Run the bootstrap step first:"
-  echo "  export HF_TOKEN=your_token"
-  echo "  python scripts/bootstrap_assets.py"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+PYTHON="${PYTHON:-python}"
+
+echo "==> [1/6] Offline assets check"
+if ! "${PYTHON}" scripts/bootstrap_assets.py --check-only; then
+  echo "请先下载离线资产，例如: export HF_TOKEN=你的token && ${PYTHON} scripts/bootstrap_assets.py" >&2
   exit 1
 fi
 
-# Fixed strongest path:
-# Demucs htdemucs_ft -> ClearerVoice MossFormer2_SE_48K -> pyannote turns
-python scripts/build_dataset.py \
-  --input-dir data/audio \
-  --output-dir "${OUTPUT_DIR}" \
-  --seed 20260409 \
-  --num-threads 8 \
-  --min-turn-sec 0.35 \
-  --turn-merge-gap-sec 0.35 \
-  --turn-glitch-max-sec 0.25 \
-  --turn-glitch-gap-sec 0.2 \
-  --child-threshold 0.6 \
-  --max-gap-seconds 30 \
-  --multi-link-threshold 0.7 \
-  --max-turns 6 \
-  --trace-dir "${TRACE_DIR}"
+echo "==> [2/6] Child dataset (build_child_dataset.sh)"
+bash build_child_dataset.sh
+
+if [ -n "${MAIN_SKIP_ASSISTANT:-}" ]; then
+  echo "==> Skipping assistant / TTS / demo (MAIN_SKIP_ASSISTANT is set)"
+  exit 0
+fi
+
+echo "==> [3/6] Assistant responses (Gemini-compatible proxy)"
+if [ -z "${GEMINI_PROXY_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+  echo "请设置环境变量 GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY（第三方代理密钥）。" >&2
+  exit 1
+fi
+bash run_assistant_responses.sh --workers "${ASSISTANT_WORKERS:-4}"
+
+if [ -n "${MAIN_SKIP_TTS:-}" ]; then
+  echo "==> Skipping TTS and demo (MAIN_SKIP_TTS is set)"
+  exit 0
+fi
+
+VENV_UNIX="${SCRIPT_DIR}/artifacts/cosyvoice/.venv/bin/python"
+VENV_WIN="${SCRIPT_DIR}/artifacts/cosyvoice/.venv/Scripts/python.exe"
+echo "==> [4/6] CosyVoice"
+if [[ ! -f "${VENV_UNIX}" && ! -f "${VENV_WIN}" ]]; then
+  echo "    未检测到 artifacts/cosyvoice/.venv ，正在运行 deploy_cosyvoice.py（首次可能较久）…"
+  "${PYTHON}" scripts/deploy_cosyvoice.py
+fi
+
+echo "==> [5/6] TTS (run_tts.sh; GPU 默认，CPU 请设 COSYVOICE_FORCE_CPU=1)"
+bash run_tts.sh \
+  --input outputs/assistant_responses_multiturn.jsonl \
+  --output outputs/assistant_responses_with_tts.jsonl
+
+echo "==> [6/6] Demo page"
+"${PYTHON}" scripts/demo/generate_demo_page.py \
+  --input outputs/assistant_responses_with_tts.jsonl
+
+echo "Done. Open demo_page/index.html in a browser (audio paths are relative to that file)."

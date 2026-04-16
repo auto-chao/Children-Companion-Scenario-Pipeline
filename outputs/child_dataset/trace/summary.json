@@ -1,8 +1,8 @@
 {
-  "candidate_turns": 141,
-  "child_kept_segments": 14,
-  "cleaned_candidate_ranges": 85,
-  "dialogs": 7,
+  "candidate_turns": 123,
+  "child_kept_segments": 12,
+  "cleaned_candidate_ranges": 52,
+  "dialogs": 4,
   "input_files": 3,
   "output_dir": "outputs/child_dataset",
   "trace_dir": "outputs/child_dataset/trace"
