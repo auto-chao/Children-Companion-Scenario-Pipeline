@@ -106,7 +106,15 @@ CosyVoice 使用独立虚拟环境 `artifacts/cosyvoice/.venv`（由 `deploy_cos
 ```mermaid
 flowchart TB
   subgraph mod_seg [模块1：语音切分与数据集]
-    s1[亲子对话音频] --> s2[儿童片段与对话 manifest]
+    s1[亲子对话音频] --> m_load["读入与重采样<br/>librosa / ffmpeg"]
+    m_load --> m_demucs["人声分离<br/>Demucs · htdemucs_ft"]
+    m_demucs --> m_cv["语音增强<br/>ClearVoice · MossFormer2_SE_48K"]
+    m_cv --> m_pya["说话人分割与轮次<br/>pyannote · speaker-diarization-community-1"]
+    m_pya --> m_child["儿童片段筛选<br/>audeering · wav2vec2-large-robust-24-ft-age-gender"]
+    m_child --> m_asr["ASR<br/>FireRedASR-AED-L"]
+    m_asr --> m_bge["为每句转写编码语义向量<br/>Sentence-Transformers · BAAI/bge-m3"]
+    m_bge --> m_link["相邻片段聚成多轮对话链<br/>NetworkX + sklearn · BGE 与时间/说话人"]
+    m_link --> s2["儿童片段与 manifest<br/>ffmpeg 切片 · manifest.jsonl"]
   end
 
   subgraph mod_resp [模块2：陪伴式回复构建]
