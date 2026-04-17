@@ -61,9 +61,10 @@ bash main.sh
 bash build_child_dataset.sh
 ```
 
-### 模块 1：ASR 与 CPU 占用
+### 模块 1：用工具提取片段、ASR 调 API 与 CPU 占用
 
-- **转写**：儿童片段与家长间隙 ASR 均通过 **GEMINI 兼容 HTTP**（[`GeminiProxyAsr`](d:/personal_code/children_companion_scenario/src/ccs_audio_pipeline/asr_gemini_proxy.py)），需 **`GEMINI_PROXY_API_KEY`**（或 `GEMINI_API_KEY`）；可选 **`GEMINI_PROXY_BASE`**、**`GEMINI_ASR_MODEL`**、**`GEMINI_ASR_PROMPT`**。单独跑 `bash build_child_dataset.sh` 前也需设置上述密钥。
+- **片段提取**：在 Demucs、pyannote 等本地声学/说话人流程判定儿童轮次后，使用 **ffmpeg** 等工具从原始亲子对话中**切出**儿童片段音频（`outputs/child_dataset/audios/`），并写入 **manifest**；具体链路见包 `ccs_audio_pipeline`（如 `pipeline.py` 中的 ffmpeg 切分）。
+- **ASR（调 API）**：儿童片段与家长间隙的转写**不跑本地 ASR 模型**，统一通过 **GEMINI 兼容 HTTP** 调用远端 API（[`GeminiProxyAsr`](d:/personal_code/children_companion_scenario/src/ccs_audio_pipeline/asr_gemini_proxy.py)），需 **`GEMINI_PROXY_API_KEY`**（或 `GEMINI_API_KEY`）；可选 **`GEMINI_PROXY_BASE`**、**`GEMINI_ASR_MODEL`**、**`GEMINI_ASR_PROMPT`**。单独跑 `bash build_child_dataset.sh` 前也需设置上述密钥。
 - **减轻 CPU 占满**：模块 1 仍有 Demucs、pyannote、儿童判定、BGE 等本地计算。可调低 `build_child_dataset.sh` 中的 **`--num-threads`**（如 `4` 或 `2`），并令 OpenMP/BLAS 与之一致，例如 `export OMP_NUM_THREADS=4` 与 `export MKL_NUM_THREADS=4`，避免与 PyTorch 线程叠乘把机器打满。
 
 ## 输出在哪里
@@ -106,12 +107,12 @@ CosyVoice 使用独立虚拟环境 `artifacts/cosyvoice/.venv`（由 `deploy_cos
 
 ## 流水线概览
 
-下图给出端到端技术路线：**模块 1** 从原始对话音频得到儿童片段与对话 manifest；**模块 2** 先在**离线研究阶段**通过豆包听评迭代 Prompt，定稿后再做**批量多模态推理**写出结构化回复；**模块 3** 将文本合成为语音并用于 **Demo**。豆包参与的一环为研究/手工 Prompt 工程，**未**在 `main.sh` 中自动化；全量跑通仓库流水线可使用上文「一键跑全流程」中的 `bash main.sh`。
+下图给出端到端技术路线：**模块 1** 用工具（如 ffmpeg）从原始对话中切出儿童片段，**ASR 通过 Gemini 兼容 API** 写入 manifest；**模块 2** 先在**离线研究阶段**通过豆包听评迭代 Prompt，定稿后再做**批量多模态推理**写出结构化回复；**模块 3** 将文本合成为语音并用于 **Demo**。豆包参与的一环为研究/手工 Prompt 工程，**未**在 `main.sh` 中自动化；全量跑通仓库流水线可使用上文「一键跑全流程」中的 `bash main.sh`。
 
 ```mermaid
 flowchart TB
   subgraph mod_seg [模块1：语音切分与数据集]
-    s1[亲子对话音频] --> s2[儿童片段与对话 manifest]
+    s1[亲子对话音频] --> s2[工具切片段 + API ASR → manifest]
   end
 
   subgraph mod_resp [模块2：陪伴式回复构建]
@@ -137,7 +138,7 @@ flowchart TB
 
 ```
 
-更细的**声学处理链路**（分离增强、说话人分割、ASR、多轮链接等）见源码包 `ccs_audio_pipeline`。
+更细的**声学处理链路**（分离增强、说话人分割、ffmpeg 切片段、API ASR、多轮链接等）见源码包 `ccs_audio_pipeline`。
 
 ## 第三方模型与许可
 
