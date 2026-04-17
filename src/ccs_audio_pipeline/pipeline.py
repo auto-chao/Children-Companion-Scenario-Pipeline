@@ -8,7 +8,6 @@ import random
 import shutil
 import subprocess
 import sys
-import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,13 +30,12 @@ from ccs_audio_pipeline.asset_config import (
     CLEARVOICE_MODEL_DIR,
     CLEARVOICE_SOURCE_DIR,
     DEMUCS_MODEL_DIR,
-    FIRERED_MODEL_DIR,
-    FIRERED_SOURCE_DIR,
     PYANNOTE_DIR,
     SEMANTIC_MODEL_DIR,
     format_missing_assets,
     missing_assets,
 )
+from ccs_audio_pipeline.asr_gemini_proxy import GeminiProxyAsr
 from ccs_audio_pipeline.dialogue_frontend import DialogueFrontend, summarize_audio_view
 from ccs_audio_pipeline.gpu_runtime import configure_cuda_backends, resolve_torch_device
 from ccs_audio_pipeline.turn_extraction import extract_child_query_turns
@@ -87,98 +85,6 @@ def set_deterministic(seed: int, num_threads: int, *, gpu_fast: bool) -> None:
     torch.use_deterministic_algorithms(True, warn_only=True)
     torch.set_num_threads(num_threads)
     torch.set_num_interop_threads(max(1, min(4, num_threads)))
-
-
-class FireRedASR:
-    """Strict FireRedASR adapter. No fallback."""
-
-    def __init__(self, source_dir: Path, model_dir: Path, *, use_gpu: bool | None = None) -> None:
-        self.source_dir = source_dir
-        self.model_dir = model_dir
-        if use_gpu is None:
-            use_gpu = torch.cuda.is_available()
-        self._use_gpu_flag = 1 if use_gpu else 0
-        self._bootstrap_import_path()
-        try:
-            mod = importlib.import_module("fireredasr.models.fireredasr")
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                "Cannot import 'fireredasr'. Download the official FireRedASR repo and place it "
-                "under 'FireRedASR/', 'vendor/FireRedASR/', or 'third_party/FireRedASR/' in the "
-                "project root, or otherwise add it to PYTHONPATH before running the pipeline."
-            ) from exc
-        if not hasattr(mod, "FireRedAsr"):
-            raise RuntimeError("Official FireRedASR source is present, but FireRedAsr class is missing.")
-        self.model = mod.FireRedAsr.from_pretrained("aed", str(self.model_dir))
-
-    def transcribe(self, clip_wave: np.ndarray, sr: int) -> str:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
-        try:
-            sf.write(tmp_path, clip_wave, sr, subtype="PCM_16")
-            results = self.model.transcribe(
-                ["segment_0000"],
-                [str(tmp_path)],
-                {
-                    "use_gpu": self._use_gpu_flag,
-                    "beam_size": 3,
-                    "nbest": 1,
-                    "decode_max_len": 0,
-                    "softmax_smoothing": 1.0,
-                    "aed_length_penalty": 0.0,
-                    "eos_penalty": 1.0,
-                },
-            )
-            return self._extract_text(results)
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
-
-    def _bootstrap_import_path(self) -> None:
-        if not self.source_dir.exists():
-            raise RuntimeError(format_missing_assets())
-        source_dir_str = str(self.source_dir)
-        if source_dir_str not in sys.path:
-            sys.path.insert(0, source_dir_str)
-
-        path_entries = [
-            str(self.source_dir / "fireredasr"),
-            str(self.source_dir / "fireredasr" / "utils"),
-        ]
-        current_path = os.environ.get("PATH", "")
-        current_parts = current_path.split(os.pathsep) if current_path else []
-        for entry in reversed(path_entries):
-            if entry not in current_parts:
-                current_parts.insert(0, entry)
-        os.environ["PATH"] = os.pathsep.join(current_parts)
-
-    @staticmethod
-    def _extract_text(results: Any) -> str:
-        def normalize(value: Any) -> str:
-            return " ".join(str(value).split())
-
-        if isinstance(results, list) and results:
-            first = results[0]
-            if isinstance(first, dict):
-                for key in ("text", "pred_txt", "transcript", "transcription"):
-                    if key in first and first[key]:
-                        return normalize(first[key])
-                for key in ("nbest", "hyps", "hypotheses", "result"):
-                    if key in first and first[key]:
-                        value = first[key][0]
-                        if isinstance(value, dict):
-                            for nested_key in ("text", "pred_txt", "transcript", "transcription"):
-                                if nested_key in value and value[nested_key]:
-                                    return normalize(value[nested_key])
-                        return normalize(value)
-            if isinstance(first, (list, tuple)) and first:
-                return normalize(first[-1])
-            return normalize(first)
-        if isinstance(results, dict):
-            for key in ("text", "pred_txt", "transcript", "transcription"):
-                if key in results and results[key]:
-                    return normalize(results[key])
-        return normalize(results)
 
 
 class ModelHead(nn.Module):
@@ -340,7 +246,7 @@ def run_pipeline() -> None:
     )
     diarization_pipeline = load_pyannote_pipeline(PYANNOTE_DIR, device, gpu_fast=gpu_fast)
     child_detector = ChildVoiceDetector(CHILD_MODEL_DIR, device=device)
-    asr = FireRedASR(FIRERED_SOURCE_DIR, FIRERED_MODEL_DIR, use_gpu=device.type == "cuda")
+    asr = GeminiProxyAsr()
     semantic_encoder = SentenceTransformer(
         str(SEMANTIC_MODEL_DIR),
         device=str(device),

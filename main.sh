@@ -3,7 +3,7 @@
 # 1) 离线资产检查  2) 儿童数据集  3) 助手回复  4) CosyVoice（按需部署） 5) TTS  6) Demo 页
 #
 # 使用前请激活与本项目一致的 conda 环境（如 ccs），并设置：
-#   GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY（助手步骤）
+#   GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY（模块 1 数据集 ASR + 模块 2 助手）
 #   HF_TOKEN（若需首次 bootstrap 或首次部署 CosyVoice 拉权重）
 # TTS 默认用 GPU；仅 CPU 推理： COSYVOICE_FORCE_CPU=1 ./main.sh
 #
@@ -27,6 +27,11 @@ if ! "${PYTHON}" scripts/bootstrap_assets.py --check-only; then
   exit 1
 fi
 
+if [ -z "${GEMINI_PROXY_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+  echo "请设置 GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY（模块 1 数据集 ASR 与模块 2 助手均需）。" >&2
+  exit 1
+fi
+
 echo "==> [2/6] Child dataset (build_child_dataset.sh)"
 bash build_child_dataset.sh
 
@@ -36,10 +41,6 @@ if [ -n "${MAIN_SKIP_ASSISTANT:-}" ]; then
 fi
 
 echo "==> [3/6] Assistant responses (Gemini-compatible proxy)"
-if [ -z "${GEMINI_PROXY_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
-  echo "请设置环境变量 GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY（第三方代理密钥）。" >&2
-  exit 1
-fi
 bash run_assistant_responses.sh --workers "${ASSISTANT_WORKERS:-4}"
 
 if [ -n "${MAIN_SKIP_TTS:-}" ]; then

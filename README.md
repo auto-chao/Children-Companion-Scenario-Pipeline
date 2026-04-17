@@ -43,13 +43,13 @@ python scripts/bootstrap_assets.py --check-only
 
 ## 一键跑全流程
 
-将示例音频放在 `data/audio/`（默认使用其中的 `*.m4a`）。设置**第三方 Gemini 兼容代理**的密钥（由你的代理服务商提供，不是 Google AI Studio 官方 key）：
+将示例音频放在 `data/audio/`（默认使用其中的 `*.m4a`）。设置**第三方 Gemini 兼容代理**的密钥（由你的代理服务商提供，不是 Google AI Studio 官方 key）。**模块 1 数据集转写与模块 2 助手**均使用该密钥（见 `src/ccs_audio_pipeline/asr_gemini_proxy.py`）。
 
 ```bash
 conda activate ccs
 export GEMINI_PROXY_API_KEY=你的代理密钥
 export HF_TOKEN=你的_huggingface_token   # 若尚未 bootstrap 或需首次部署 CosyVoice
-export ASSISTANT_WORKERS=4               # 第3步并行 worker（默认 4，可按配额调小）
+export ASSISTANT_WORKERS=4               # 助手步骤并行 worker（默认 4，可按配额调小）
 bash main.sh
 ```
 
@@ -61,13 +61,18 @@ bash main.sh
 bash build_child_dataset.sh
 ```
 
+### 模块 1：ASR 与 CPU 占用
+
+- **转写**：儿童片段与家长间隙 ASR 均通过 **GEMINI 兼容 HTTP**（[`GeminiProxyAsr`](d:/personal_code/children_companion_scenario/src/ccs_audio_pipeline/asr_gemini_proxy.py)），需 **`GEMINI_PROXY_API_KEY`**（或 `GEMINI_API_KEY`）；可选 **`GEMINI_PROXY_BASE`**、**`GEMINI_ASR_MODEL`**、**`GEMINI_ASR_PROMPT`**。单独跑 `bash build_child_dataset.sh` 前也需设置上述密钥。
+- **减轻 CPU 占满**：模块 1 仍有 Demucs、pyannote、儿童判定、BGE 等本地计算。可调低 `build_child_dataset.sh` 中的 **`--num-threads`**（如 `4` 或 `2`），并令 OpenMP/BLAS 与之一致，例如 `export OMP_NUM_THREADS=4` 与 `export MKL_NUM_THREADS=4`，避免与 PyTorch 线程叠乘把机器打满。
+
 ## 输出在哪里
 
 | 路径 | 说明 |
 |------|------|
 | `outputs/child_dataset/manifest.jsonl` | 多轮对话样本；除儿童片段 ASR（`user`/`user_*`）外，含相邻两轮之间（及片尾）**家长说话 ASR**（`assistant`/`assistant_*`），可选片头 `recording_prefix_adult` |
 | `outputs/child_dataset/audios/*.m4a` | 儿童片段音频 |
-| `outputs/assistant_responses_multiturn.jsonl` | 助手回复（含 `plain_text`、`semantic_content`、`acoustic_emotion`；多轮时历史轮以文本摘要注入，并含 `recording_dialogue_ref` 录音参考块） |
+| `outputs/assistant_responses_multiturn.jsonl` | 助手回复（含 `plain_text`、`semantic_content`、`acoustic_emotion`；多轮时历史轮以文本摘要注入；`recording_dialogue_ref` 为按轮次截断的亲子转录参考文本，多轮时每轮可含 `recording_dialogue_ref`） |
 | `outputs/tts_generated/*.wav` | 合成语音 |
 | `outputs/assistant_responses_with_tts.jsonl` | 带 `tts_audio` 路径的汇总 |
 | `demo_page/index.html` | 浏览器对照收听；**推荐**用 `bash demo_page/local_http.sh start` 起本地 HTTP 后打开提示的 URL（`file://` 直接打开可能无法播放音频）。`local_http.sh` 会自动探测 `PYTHON` / `python3` / `py`（含真实 `sys.executable`）/ `python`（跳过 Windows Store 占位），必要时用 `where.exe` 与 cmd 侧 PATH 对齐；仍失败可设置 `PYTHON` |
@@ -136,4 +141,4 @@ flowchart TB
 
 ## 第三方模型与许可
 
-本仓库代码以 **Apache-2.0** 发布（见 [`LICENSE`](LICENSE)）。依赖的 **Demucs、pyannote、CosyVoice、FireRedASR、Sentence-Transformers、BGE** 等第三方权重各有原始许可证与条款；用于研究或产品前请自行阅读并遵守。生成内容不代表任何机构观点。
+本仓库代码以 **Apache-2.0** 发布（见 [`LICENSE`](LICENSE)）。依赖的 **Demucs、pyannote、CosyVoice、Sentence-Transformers、BGE** 等第三方权重各有原始许可证与条款；用于研究或产品前请自行阅读并遵守。生成内容不代表任何机构观点。

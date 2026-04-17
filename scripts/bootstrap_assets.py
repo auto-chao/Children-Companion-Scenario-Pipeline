@@ -19,8 +19,6 @@ from ccs_audio_pipeline.asset_config import (
     DEMUCS_MODEL_DIR,
     DEMUCS_MODEL_FILES,
     DEMUCS_REMOTE_ROOT_URL,
-    FIRERED_SOURCE_DIR,
-    FIRERED_SOURCE_ZIP_URL,
     HF_ASSETS,
     assets_ready,
     format_missing_assets,
@@ -81,13 +79,6 @@ def main() -> None:
         label="ClearerVoice source",
         url=CLEARVOICE_SOURCE_ZIP_URL,
         destination_dir=CLEARVOICE_SOURCE_DIR,
-        force=args.force,
-        retries=args.retries,
-    )
-    download_source_archive(
-        label="FireRedASR source",
-        url=FIRERED_SOURCE_ZIP_URL,
-        destination_dir=FIRERED_SOURCE_DIR,
         force=args.force,
         retries=args.retries,
     )
@@ -213,34 +204,6 @@ def download_url(url: str, destination: Path, retries: int, label: str) -> None:
 
     assert last_error is not None
     raise last_error
-
-
-def download_firered_source(force: bool) -> None:
-    asset_missing = "FireRedASR source" in missing_assets()
-    if not force and not asset_missing:
-        print(f"[skip] FireRedASR source: {FIRERED_SOURCE_DIR}")
-        return
-
-    if force and FIRERED_SOURCE_DIR.exists():
-        shutil.rmtree(FIRERED_SOURCE_DIR)
-    FIRERED_SOURCE_DIR.parent.mkdir(parents=True, exist_ok=True)
-
-    print(f"[download] FireRedASR source -> {FIRERED_SOURCE_DIR}")
-    with tempfile.TemporaryDirectory() as tmpdir_str:
-        tmpdir = Path(tmpdir_str)
-        zip_path = tmpdir / "firered_source.zip"
-        with urllib.request.urlopen(FIRERED_SOURCE_ZIP_URL) as response, zip_path.open("wb") as f:
-            shutil.copyfileobj(response, f)
-
-        extract_dir = tmpdir / "extract"
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(extract_dir)
-
-        extracted_roots = [path for path in extract_dir.iterdir() if path.is_dir()]
-        if len(extracted_roots) != 1:
-            raise RuntimeError("Unexpected FireRedASR zip structure.")
-
-        shutil.copytree(extracted_roots[0], FIRERED_SOURCE_DIR, dirs_exist_ok=True)
 
 
 if __name__ == "__main__":

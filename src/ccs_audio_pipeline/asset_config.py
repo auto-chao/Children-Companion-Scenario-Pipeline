@@ -32,13 +32,6 @@ SEMANTIC_REPO_ID = "BAAI/bge-m3"
 SEMANTIC_REVISION = "main"
 SEMANTIC_MODEL_DIR = MODELS_ROOT / "baai" / "bge-m3"
 
-FIRERED_MODEL_REPO_ID = "FireRedTeam/FireRedASR-AED-L"
-FIRERED_MODEL_REVISION = "main"
-FIRERED_MODEL_DIR = MODELS_ROOT / "firered" / "FireRedASR-AED-L"
-
-FIRERED_SOURCE_DIR = VENDOR_ROOT / "FireRedASR"
-FIRERED_SOURCE_ZIP_URL = "https://github.com/FireRedTeam/FireRedASR/archive/refs/heads/main.zip"
-
 CLEARVOICE_MODEL_REPO_ID = "alibabasglab/MossFormer2_SE_48K"
 CLEARVOICE_MODEL_REVISION = "main"
 CLEARVOICE_MODEL_DIR = MODELS_ROOT / "clearvoice" / "MossFormer2_SE_48K"
@@ -111,21 +104,6 @@ HF_ASSETS = [
         ),
     ),
     HfAssetSpec(
-        name="FireRedASR AED weights",
-        repo_id=FIRERED_MODEL_REPO_ID,
-        revision=FIRERED_MODEL_REVISION,
-        local_dir=FIRERED_MODEL_DIR,
-        allow_patterns=(
-            "README.md",
-            "cmvn.ark",
-            "cmvn.txt",
-            "config.yaml",
-            "dict.txt",
-            "model.pth.tar",
-            "train_bpe1000.model",
-        ),
-    ),
-    HfAssetSpec(
         name="ClearerVoice MossFormer2_SE_48K weights",
         repo_id=CLEARVOICE_MODEL_REPO_ID,
         revision=CLEARVOICE_MODEL_REVISION,
@@ -169,17 +147,6 @@ ASSET_MARKERS = {
     "ClearerVoice MossFormer2_SE_48K weights": [
         CLEARVOICE_MODEL_DIR / "last_best_checkpoint",
         CLEARVOICE_MODEL_DIR / "last_best_checkpoint.pt",
-    ],
-    "FireRedASR source": [
-        FIRERED_SOURCE_DIR / "fireredasr" / "models" / "fireredasr.py",
-    ],
-    "FireRedASR AED weights": [
-        FIRERED_MODEL_DIR / "cmvn.ark",
-        FIRERED_MODEL_DIR / "cmvn.txt",
-        FIRERED_MODEL_DIR / "config.yaml",
-        FIRERED_MODEL_DIR / "dict.txt",
-        FIRERED_MODEL_DIR / "model.pth.tar",
-        FIRERED_MODEL_DIR / "train_bpe1000.model",
     ],
 }
 

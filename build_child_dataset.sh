@@ -11,6 +11,14 @@ cd "${SCRIPT_DIR}"
 
 PYTHON="${PYTHON:-python}"
 
+# 模块 1 转写走 GEMINI 兼容 HTTP（见 src/ccs_audio_pipeline/asr_gemini_proxy.py）
+if [ -z "${GEMINI_PROXY_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
+  echo "请设置 GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY（数据集 ASR 与代理一致）。" >&2
+  exit 1
+fi
+
+# 减轻 CPU 占满：可调小 --num-threads（如 2～4），并与 BLAS 对齐，例如：
+#   export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4
 OUTPUT_DIR="outputs/child_dataset"
 TRACE_DIR="${OUTPUT_DIR}/trace"
 

@@ -7,8 +7,8 @@
 理解儿童语音并生成回复。manifest 中的 ``user`` 等为归档/对齐；**当前轮**仍以音频为主输入。
 
 多轮模式（``--mode multi``）：**历史轮**为文本——每轮 user 侧为上一轮模型已产出的 ``semantic_content`` 与
-``acoustic_emotion``，model 侧为该轮 ``plain_text``；**当前轮**为 **录音对话参考（若有）+ 任务说明 + 本轮儿童音频**。
-另将 manifest 中 **亲子对话 ASR**（含大人 ``assistant`` 槽位与可选 ``recording_prefix_adult``）作为只读语境块注入。
+``acoustic_emotion``，model 侧为该轮 ``plain_text``；**当前轮**为 **按轮次截断的亲子转录参考（若有）+ 任务说明 + 本轮儿童音频**。
+``recording_dialogue_ref`` 仅包含截至当前轮的 user 与历史轮的 user/家长(录音)转写（不含「未来」轮次与当前轮之后家长话）。
 模型 JSON 含 ``semantic_content``、``acoustic_emotion``、``plain_text``。
 
 调用经 ``local_api_logger.wrap_requests_call`` 记录到 ``api_call/api_logs/``。
@@ -85,7 +85,7 @@ _CHILD_DATASET_ROOT = _ROOT / "outputs" / "child_dataset"
 HEADERS = {"Content-Type": "application/json"}
 
 _RECORDING_CTX_HEADER = (
-    "【录音对话参考（真实亲子对话 ASR，仅辅助理解语境，勿逐字复述）】"
+    "【历史对话&&当前轮输入语音的转录文本（仅供参考，本轮输入以语音为准）】"
 )
 
 # SYSTEM_INSTRUCTION = """你是面向 5～10 岁儿童的「暖心大哥哥/大姐姐 AI 助手」。你具备极强的儿童心理洞察力和模糊语音识别能力。只输出结构化 JSON，按以下策略思考：
@@ -198,28 +198,39 @@ _RECORDING_CTX_HEADER = (
 
 
 SYSTEM_INSTRUCTION = """
-你是5-10岁儿童的平等玩伴，需严格按以下标准生成回复：
+# 任务核心定位
+你是面向5-10岁儿童的平等玩伴，需严格遵循以下所有标准生成回复。你可参考提供的历史对话上下文，核心需精准校验并理解当前轮儿童语音ASR内容，若存在识别模糊的内容，可自然融入对话语境处理，最终生成符合要求的高质量回复。
 
-【语言标准】单句≤12字，每轮2-3句，用逗号自然断句；用"太酷了""挑战一下"等儿童流行词，禁用成语、叠词、黑话。
+# 执行标准
+【语义理解与回复标准】
+1. 无需对儿童表达中的歧义叠词、口语化模糊表述做澄清，直接贴合儿童的真实表达意图理解并回应。
+示例：儿童说“恐龙吃啥？肉肉吗？”，回复：“对呀，很多恐龙都喜欢吃肉哦，比如霸王龙，它们就爱吃其他小型恐龙或动物。不过也有很温柔的食草恐龙，比如三角龙，它们最喜欢吃嫩嫩的树叶和小花啦。你喜欢哪种类型的恐龙呀？”
+2. 精准识别并正确理解儿童表达中的语法错误、用词不当、发音偏差及断续表述，做到无遗漏、无误判。
+示例：儿童说“你系谁啊？几岁呀？”，回复：“我是小艺呀，我没有具体的年龄呢，不过不管你多大，我都可以陪你聊天哦。”
+3. 回复措辞必须贴合5-10岁儿童的认知水平，通俗易懂，避免复杂术语和成人化表达。
+示例：儿童说“恐龙为什么会灭绝呀？”，回复：“关于恐龙灭绝呀，科学家们觉得是因为发生了两件大事：第一件是天上掉下来一颗超级大的陨石，砸到了地球上；第二件是地底下有很多火山同时爆发，把天空变得黑黑的，植物没法生长，恐龙们没有吃的，就慢慢消失了。”
 
-【互动标准】100%围绕孩子当前话题，每轮最多1个开放式问题，禁用"是不是"类封闭提问；必须留可延续对话的钩子，禁止闭环内容。
+【互动标准】
+始终围绕儿童当前发起的话题展开对话，不主动结束话题，可适度引导儿童表达自身的想法与感受。
 
-【情绪标准】孩子兴奋时用"哇""耶"等前置情绪词，委屈时先共情再引导，卡顿犹豫时放慢节奏不催促；不纠正孩子口误、逻辑或表达。
+【情绪共情标准】
+充分共情儿童的情绪，针对儿童的正向表达给予真诚的鼓励，针对负面情绪给予温暖的安慰与支持。
+示例：儿童说“小美不和我玩了”，回复：“那你心里一定特别难过吧，你愿意和我说说小美为什么不跟你玩了吗？我们也可以试着找别的小朋友一起玩，说不定会交到更合拍的新朋友哦。”
 
-【安全标准】绝对禁止说教、提要求、教育内容；规避暴力、恐怖等不适话题，仅聊儿童日常场景。
+【安全合规标准】
+严格规避暴力、恐怖等不适宜儿童的话题与内容；针对危险行为、不当遭遇，必须第一时间干预，明确告知儿童需第一时间告诉父母/老师，并提供安全的替代方案。
+示例1：儿童说“我是奥特曼，我想从窗户飞出去”，回复：“奥特曼可不能从窗户飞出去哦，这太危险啦！奥特曼在地球上的使命是保护大家，我们还是在家里玩安全的游戏吧。你想跟我玩什么游戏呢？”
+示例2：儿童说“今天幼儿园有个叔叔亲我脸了”，回复：“这种情况一定要马上告诉爸爸妈妈哦，让他们知道发生了什么。以后如果有不认识的人碰你，要记得立刻躲开，然后告诉老师和爸爸妈妈。你现在能把这件事告诉爸爸或者妈妈吗？”
 
-【TTS适配】句首可加"咦""哎"等语气助词，单句最多1个标点，避免长句导致平调；不用感叹号叠加。
-
-【角色标准】保持高年级玩伴人设，会接梗不摆架子，绝对禁止重复历史回复或句式。
-
-【容错理解&&回应策略标准】面对模糊语音：1. 提取核心关键词模糊匹配；2. 用上下文补全断裂语义；3. 对重复、停顿、尾音缺失内容，默认按完整意图处理，不追问确认。语音不清晰时：1. 用猜测式回应确认核心需求，句式为"你是想XX吗？"；2. 主动提供具体选项缩小范围；3. 绝对禁止说"听不懂""再说一遍"，改用引导式表达。
+【角色人设标准】
+始终保持高年级同龄玩伴的人设，平等对话，自然接话，不摆架子、不刻意装可爱、不做作；绝对禁止重复历史对话中的回复内容与句式，保证每轮回复的原创性。
 
 # 输出格式强制要求
-必须严格输出**纯JSON对象**，严禁输出任何Markdown围栏、解释性文字、注释、前后缀内容，JSON固定包含以下3个字段，字段定义与输出规则如下：
+必须严格输出**纯JSON对象**，严禁输出任何Markdown代码围栏、解释性文字、注释、前后缀冗余内容。JSON必须固定包含以下3个字段，字段定义与输出规则如下：
 {
-  "semantic_content": "【必填】孩子语音的语义信息",
-  "acoustic_emotion": "【必填】孩子语音的声学信息",
-  "plain_text": "【必填】你的回复文本"
+  "semantic_content": "【必填】精准提炼当前轮儿童语音表达的核心语义信息",
+  "acoustic_emotion": "【必填】识别并描述当前轮儿童语音对应的声学情绪特征（如开心、委屈、好奇、生气、难过等）",
+  "plain_text": "【必填】符合上述所有标准的回复文本内容"
 }
 """
 
@@ -352,8 +363,10 @@ def _turns_from_manifest_row(row: dict[str, Any]) -> list[tuple[str, str]]:
     return turns
 
 
-def _full_dialogue_text_from_manifest(row: dict[str, Any]) -> str:
-    """从 manifest 行拼「孩子 / 家长(录音)」脚本，供模型只读参考。"""
+def _dialogue_ref_text_for_turn(row: dict[str, Any], turn_idx: int) -> str:
+    """第 k 轮请求用：片头（若有）+ i<k 的 user_i 与 assistant_i + 当前 user_k（不含 assistant_k）。"""
+    if turn_idx < 1:
+        return ""
     parts: list[str] = []
     prefix = row.get("recording_prefix_adult")
     if isinstance(prefix, str) and prefix.strip():
@@ -361,28 +374,33 @@ def _full_dialogue_text_from_manifest(row: dict[str, Any]) -> str:
 
     msgs = row.get("messages")
     if isinstance(msgs, list) and msgs:
-        for mi in range(0, len(msgs), 2):
-            um = msgs[mi] if mi < len(msgs) else None
-            am = msgs[mi + 1] if mi + 1 < len(msgs) else None
+        for pi in range(turn_idx):
+            uidx = 2 * pi
+            if uidx >= len(msgs):
+                break
+            um = msgs[uidx]
             if isinstance(um, dict) and um.get("role") == "user":
                 ut = (um.get("text") or "").strip()
                 parts.append(f"孩子：{ut}")
-            if isinstance(am, dict) and am.get("role") == "assistant":
-                at = (am.get("text") or "").strip()
-                if at:
-                    parts.append(f"家长(录音)：{at}")
+            if pi < turn_idx - 1:
+                am = msgs[uidx + 1] if uidx + 1 < len(msgs) else None
+                if isinstance(am, dict) and am.get("role") == "assistant":
+                    at = (am.get("text") or "").strip()
+                    if at:
+                        parts.append(f"家长(录音)：{at}")
         return "\n".join(parts)
 
-    for ti in range(1, 65):
+    for ti in range(1, turn_idx + 1):
         uk = "user" if ti == 1 else f"user_{ti}"
-        ak = "assistant" if ti == 1 else f"assistant_{ti}"
         if uk not in row:
             break
         ut = (row.get(uk) or "").strip()
         parts.append(f"孩子：{ut}")
-        at = (row.get(ak) or "").strip()
-        if at:
-            parts.append(f"家长(录音)：{at}")
+        if ti < turn_idx:
+            ak = "assistant" if ti == 1 else f"assistant_{ti}"
+            at = (row.get(ak) or "").strip()
+            if at:
+                parts.append(f"家长(录音)：{at}")
     return "\n".join(parts)
 
 
@@ -532,7 +550,7 @@ def _build_multiturn_contents(
     audio_mime: str,
     full_dialogue_text: str,
 ) -> list[dict[str, Any]]:
-    """history_turns：已完成轮次的 semantic/acoustic/plain_text；当前轮带录音参考与本轮音频。"""
+    """history_turns：已完成轮次的 semantic/acoustic/plain_text；当前轮带按轮截断的转录参考与本轮音频。"""
     contents: list[dict[str, Any]] = []
     for ht in history_turns:
         contents.append(
@@ -851,7 +869,7 @@ def main() -> int:
             "input_mode": "audio",
             "turns": [turn0],
             "line_error": None,
-            "recording_dialogue_ref": _full_dialogue_text_from_manifest(row) or None,
+            "recording_dialogue_ref": _dialogue_ref_text_for_turn(row, 1) or None,
         }
 
         try:
@@ -866,7 +884,7 @@ def main() -> int:
                 max_retries=args.max_retries,
                 base_sleep=args.retry_sleep,
                 use_google_search=args.with_google_search,
-                recording_dialogue_text=_full_dialogue_text_from_manifest(row),
+                recording_dialogue_text=_dialogue_ref_text_for_turn(row, 1),
             )
             turn0["plain_text"] = out["plain_text"]
             turn0["semantic_content"] = out.get("semantic_content") or ""
@@ -927,13 +945,14 @@ def main() -> int:
                 }
             start_turn, history_turns = rs
 
-        recording_ref = _full_dialogue_text_from_manifest(row)
-
         turn_entries: list[dict[str, Any]] = []
         n_api_local = 0
+        last_recording_ref: str | None = None
         for turn_idx in range(start_turn, len(turns) + 1):
             audio_rel, query = turns[turn_idx - 1]
             audio_path = _resolve_audio_path(audio_rel)
+            dialogue_ref_turn = _dialogue_ref_text_for_turn(row, turn_idx)
+            last_recording_ref = dialogue_ref_turn or last_recording_ref
             turn_d: dict[str, Any] = {
                 "turn_index": turn_idx,
                 "query": query,
@@ -943,6 +962,7 @@ def main() -> int:
                 "semantic_content": None,
                 "acoustic_emotion": None,
                 "error": None,
+                "recording_dialogue_ref": dialogue_ref_turn or None,
             }
             try:
                 if not audio_rel or not audio_path.is_file():
@@ -952,7 +972,7 @@ def main() -> int:
                     history_turns=history_turns,
                     current_audio_b64=cur_b64,
                     audio_mime=args.audio_mime,
-                    full_dialogue_text=recording_ref,
+                    full_dialogue_text=dialogue_ref_turn,
                 )
                 out = _call_proxy_with_contents(
                     base=args.api_base,
@@ -999,7 +1019,7 @@ def main() -> int:
             "input_mode": "audio_multiturn",
             "turns": merged_turns,
             "line_error": line_err,
-            "recording_dialogue_ref": recording_ref or None,
+            "recording_dialogue_ref": last_recording_ref,
         }
         ok = (len(merged_turns) == len(turns)) and not any(
             t.get("error") for t in merged_turns
