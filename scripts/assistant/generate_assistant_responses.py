@@ -6,10 +6,8 @@
 与 ``api_call/api_call_final.py`` 一致：请求体中带 **inline_data 音频**（m4a），由多模态模型
 理解儿童语音并生成回复。manifest 中的 ``user`` 等为归档/对齐；**当前轮**仍以音频为主输入。
 
-多轮模式（``--mode multi``）：**历史轮**为文本——每轮 user 侧为上一轮模型已产出的 ``semantic_content`` 与
-``acoustic_emotion``，model 侧为该轮 ``plain_text``；**当前轮**为 **录音对话参考（若有）+ 任务说明 + 本轮儿童音频**。
-另将 manifest 中 **亲子对话 ASR**（含大人 ``assistant`` 槽位与可选 ``recording_prefix_adult``）作为只读语境块注入。
-模型 JSON 含 ``semantic_content``、``acoustic_emotion``、``plain_text``。
+多轮模式（``--mode multi``）：每一轮 API 请求在 ``contents`` 末尾为单条 ``user``：**孩子 ASR 历史 + 历史轮 API 的 plain_text（玩伴回复）**，一直到本轮孩子话，再拼任务说明与**本轮**儿童音频 ``inline_data``；不再注入录音中的家长 ASR。
+模型 JSON 仍含 ``semantic_content``、``acoustic_emotion``、``plain_text``；输出 JSONL 中 ``recording_dialogue_ref`` 仍为**整段** manifest 转写便于归档。
 
 调用经 ``local_api_logger.wrap_requests_call`` 记录到 ``api_call/api_logs/``。
 
@@ -84,9 +82,8 @@ _CHILD_DATASET_ROOT = _ROOT / "outputs" / "child_dataset"
 
 HEADERS = {"Content-Type": "application/json"}
 
-_RECORDING_CTX_HEADER = (
-    "【录音对话参考（真实亲子对话 ASR，仅辅助理解语境，勿逐字复述）】"
-)
+_RECORDING_CTX_HEADER = "【多轮对话上下文（孩子转写 + 历史玩伴回复，不含录音中家长话）】"
+_SINGLE_RECORDING_CTX_HEADER = "【录音对话参考（真实亲子对话 ASR，仅辅助理解语境，勿逐字复述）】"
 
 # SYSTEM_INSTRUCTION = """你是面向 5～10 岁儿童的「暖心大哥哥/大姐姐 AI 助手」。你具备极强的儿童心理洞察力和模糊语音识别能力。只输出结构化 JSON，按以下策略思考：
 
@@ -363,8 +360,40 @@ def _turns_from_manifest_row(row: dict[str, Any]) -> list[tuple[str, str]]:
     return turns
 
 
-def _full_dialogue_text_from_manifest(row: dict[str, Any]) -> str:
-    """从 manifest 行拼「孩子 / 家长(录音)」脚本，供模型只读参考。"""
+def _child_transcript_for_turn(row: dict[str, Any], turn_1based: int) -> str:
+    """返回指定轮次的孩子转写文本。"""
+    if turn_1based < 1:
+        raise ValueError("turn_1based must be >= 1")
+    turns = _turns_from_manifest_row(row)
+    idx = turn_1based - 1
+    if idx >= len(turns):
+        return ""
+    return str(turns[idx][1] or "").strip()
+
+
+def _multiturn_api_history_text(
+    row: dict[str, Any], turn_1based: int, prior_plain_texts: list[str]
+) -> str:
+    """构造第 k 轮请求用历史文本：孩子1 + 回复1 + ... + 孩子k。"""
+    if turn_1based < 1:
+        raise ValueError("turn_1based must be >= 1")
+    if len(prior_plain_texts) != max(0, turn_1based - 1):
+        raise ValueError(
+            f"prior_plain_texts length mismatch: got={len(prior_plain_texts)}, expected={turn_1based - 1}"
+        )
+    parts: list[str] = []
+    for ti in range(1, turn_1based + 1):
+        child = _child_transcript_for_turn(row, ti)
+        parts.append(f"孩子：{child}")
+        if ti < turn_1based:
+            parts.append(f"【玩伴回复】{prior_plain_texts[ti - 1]}")
+    return "\n".join(parts)
+
+
+def _dialogue_transcript_through_child_turn(row: dict[str, Any], turn_1based: int) -> str:
+    """亲子 ASR 转写：片头 + 第 1..k-1 轮「孩子 + 家长(录音)」+ 第 k 轮仅孩子（不含本轮之后与未来轮）。"""
+    if turn_1based < 1:
+        raise ValueError("turn_1based must be >= 1")
     parts: list[str] = []
     prefix = row.get("recording_prefix_adult")
     if isinstance(prefix, str) and prefix.strip():
@@ -372,37 +401,43 @@ def _full_dialogue_text_from_manifest(row: dict[str, Any]) -> str:
 
     msgs = row.get("messages")
     if isinstance(msgs, list) and msgs:
-        for mi in range(0, len(msgs), 2):
+        for ti in range(1, turn_1based + 1):
+            mi = 2 * (ti - 1)
             um = msgs[mi] if mi < len(msgs) else None
-            am = msgs[mi + 1] if mi + 1 < len(msgs) else None
             if isinstance(um, dict) and um.get("role") == "user":
                 ut = (um.get("text") or "").strip()
                 parts.append(f"孩子：{ut}")
-            if isinstance(am, dict) and am.get("role") == "assistant":
-                at = (am.get("text") or "").strip()
-                if at:
-                    parts.append(f"家长(录音)：{at}")
+            if ti < turn_1based:
+                am = msgs[mi + 1] if mi + 1 < len(msgs) else None
+                if isinstance(am, dict) and am.get("role") == "assistant":
+                    at = (am.get("text") or "").strip()
+                    if at:
+                        parts.append(f"家长(录音)：{at}")
         return "\n".join(parts)
 
-    for ti in range(1, 65):
+    for ti in range(1, turn_1based + 1):
         uk = "user" if ti == 1 else f"user_{ti}"
         ak = "assistant" if ti == 1 else f"assistant_{ti}"
         if uk not in row:
             break
         ut = (row.get(uk) or "").strip()
         parts.append(f"孩子：{ut}")
-        at = (row.get(ak) or "").strip()
-        if at:
-            parts.append(f"家长(录音)：{at}")
+        if ti < turn_1based:
+            at = (row.get(ak) or "").strip()
+            if at:
+                parts.append(f"家长(录音)：{at}")
     return "\n".join(parts)
 
 
-def _history_user_text(*, semantic_content: str, acoustic_emotion: str) -> str:
-    return (
-        "【历史轮·孩子语音理解（文本摘要）】\n"
-        f"语义：{semantic_content}\n"
-        f"声学：{acoustic_emotion}"
-    )
+def _full_dialogue_text_from_manifest(row: dict[str, Any]) -> str:
+    """从 manifest 行拼整段「孩子 / 家长(录音)」脚本（归档 / 单轮参考）；等价于截至最后一轮儿童的截断。"""
+    n = len(_turns_from_manifest_row(row))
+    if n < 1:
+        prefix = row.get("recording_prefix_adult")
+        if isinstance(prefix, str) and prefix.strip():
+            return f"【片头家长】{prefix.strip()}"
+        return ""
+    return _dialogue_transcript_through_child_turn(row, n)
 
 
 def _call_proxy_with_contents(
@@ -513,7 +548,7 @@ def _call_proxy_audio_single_turn(
     text_bits: list[str] = []
     fd = (recording_dialogue_text or "").strip()
     if fd:
-        text_bits.append(_RECORDING_CTX_HEADER + "\n" + fd)
+        text_bits.append(_SINGLE_RECORDING_CTX_HEADER + "\n" + fd)
     text_bits.append(_full_task_text())
     full_text = "\n\n".join(text_bits)
     contents: list[dict[str, Any]] = [
@@ -538,40 +573,18 @@ def _call_proxy_audio_single_turn(
 
 def _build_multiturn_contents(
     *,
-    history_turns: list[dict[str, str]],
+    history_dialogue_text: str,
     current_audio_b64: str,
     audio_mime: str,
-    full_dialogue_text: str,
 ) -> list[dict[str, Any]]:
-    """history_turns：已完成轮次的 semantic/acoustic/plain_text；当前轮带录音参考与本轮音频。"""
-    contents: list[dict[str, Any]] = []
-    for ht in history_turns:
-        contents.append(
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": _history_user_text(
-                            semantic_content=ht.get("semantic_content") or "",
-                            acoustic_emotion=ht.get("acoustic_emotion") or "",
-                        )
-                    }
-                ],
-            }
-        )
-        contents.append(
-            {
-                "role": "model",
-                "parts": [{"text": ht.get("plain_text") or ""}],
-            }
-        )
+    """单条 user：孩子+历史玩伴回复文本（若有）+ 任务说明 + 本轮儿童音频。"""
     text_bits: list[str] = []
-    fd = (full_dialogue_text or "").strip()
+    fd = (history_dialogue_text or "").strip()
     if fd:
         text_bits.append(_RECORDING_CTX_HEADER + "\n" + fd)
     text_bits.append(_full_task_text())
     combined = "\n\n".join(text_bits)
-    contents.append(
+    return [
         {
             "role": "user",
             "parts": [
@@ -579,8 +592,7 @@ def _build_multiturn_contents(
                 {"inline_data": {"mime_type": audio_mime, "data": current_audio_b64}},
             ],
         }
-    )
-    return contents
+    ]
 
 
 def _load_done_single_skip(out_path: Path) -> tuple[set[int], set[str]]:
@@ -663,14 +675,14 @@ def _load_multiturn_existing_records(out_path: Path) -> dict[int, dict[str, Any]
 
 def _multiturn_resume_state(
     existing: dict[str, Any] | None, total_turns: int
-) -> tuple[int, list[dict[str, str]]] | None:
-    """若该行已全部成功则返回 None；否则返回 (下一轮次 1-based, 已完成各轮摘要列表)。"""
+) -> tuple[int, list[str]] | None:
+    """若该行已全部成功则返回 None；否则返回 (下一轮次, 历史 plain_text 列表)。"""
     if existing is None:
         return 1, []
     turns_list = existing.get("turns")
     if not isinstance(turns_list, list):
         return 1, []
-    success: dict[int, dict[str, str]] = {}
+    success: dict[int, str] = {}
     for t in turns_list:
         if not isinstance(t, dict):
             continue
@@ -678,20 +690,17 @@ def _multiturn_resume_state(
         err = t.get("error")
         pt = t.get("plain_text")
         if isinstance(ti, int) and err is None and isinstance(pt, str) and pt.strip():
-            sem = t.get("semantic_content")
-            ae = t.get("acoustic_emotion")
-            success[ti] = {
-                "plain_text": pt.strip(),
-                "semantic_content": sem.strip() if isinstance(sem, str) else "",
-                "acoustic_emotion": ae.strip() if isinstance(ae, str) else "",
-            }
+            success[ti] = pt.strip()
     if len(success) >= total_turns:
         return None
-    next_t = max(success.keys(), default=0) + 1
+    next_t = 1
+    prior_plain_texts: list[str] = []
+    while next_t in success:
+        prior_plain_texts.append(success[next_t])
+        next_t += 1
     if next_t > total_turns:
         return None
-    history = [success[i] for i in range(1, next_t)]
-    return next_t, history
+    return next_t, prior_plain_texts
 
 
 def main() -> int:
@@ -925,7 +934,7 @@ def main() -> int:
         existing = multiturn_existing.get(manifest_line)
         if args.no_resume:
             start_turn = 1
-            history_turns: list[dict[str, str]] = []
+            prior_plain_texts: list[str] = []
         else:
             rs = _multiturn_resume_state(existing, len(turns))
             if rs is None:
@@ -936,7 +945,7 @@ def main() -> int:
                     "record": None,
                     "message": None,
                 }
-            start_turn, history_turns = rs
+            start_turn, prior_plain_texts = rs
 
         recording_ref = _full_dialogue_text_from_manifest(row)
 
@@ -959,11 +968,11 @@ def main() -> int:
                 if not audio_rel or not audio_path.is_file():
                     raise FileNotFoundError(f"无效或缺失音频路径: {audio_rel!r} -> {audio_path}")
                 cur_b64 = base64.standard_b64encode(audio_path.read_bytes()).decode("ascii")
+                hist_txt = _multiturn_api_history_text(row, turn_idx, prior_plain_texts)
                 contents = _build_multiturn_contents(
-                    history_turns=history_turns,
+                    history_dialogue_text=hist_txt,
                     current_audio_b64=cur_b64,
                     audio_mime=args.audio_mime,
-                    full_dialogue_text=recording_ref,
                 )
                 out = _call_proxy_with_contents(
                     base=args.api_base,
@@ -979,13 +988,7 @@ def main() -> int:
                 turn_d["semantic_content"] = out.get("semantic_content") or ""
                 turn_d["acoustic_emotion"] = out.get("acoustic_emotion") or ""
                 turn_entries.append(turn_d)
-                history_turns.append(
-                    {
-                        "plain_text": out["plain_text"],
-                        "semantic_content": turn_d["semantic_content"] or "",
-                        "acoustic_emotion": turn_d["acoustic_emotion"] or "",
-                    }
-                )
+                prior_plain_texts.append(out["plain_text"])
             except Exception as e:
                 turn_d["error"] = f"{type(e).__name__}: {e}"
                 turn_entries.append(turn_d)

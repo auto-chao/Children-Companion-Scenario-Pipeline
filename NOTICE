@@ -4,5 +4,6 @@ Copyright 2026 ccs team
 This product includes software developed as part of this project,
 licensed under the Apache License, Version 2.0.
 
-Third-party models and datasets (Demucs, pyannote, CosyVoice, FireRedASR,
-Hugging Face weights, etc.) remain under their respective licenses.
+Third-party models and datasets (Demucs, pyannote, CosyVoice,
+third-party Gemini-compatible proxy APIs, Hugging Face weights, etc.)
+remain under their respective licenses or terms of service.
