@@ -73,7 +73,7 @@ bash build_child_dataset.sh
 |------|------|
 | `outputs/child_dataset/manifest.jsonl` | 多轮对话样本；除儿童片段 ASR（`user`/`user_*`）外，含相邻两轮之间（及片尾）**家长说话 ASR**（`assistant`/`assistant_*`），可选片头 `recording_prefix_adult`；每样本含 **`child_turn_qa`**（每儿童轮次 `qa_status` / `qa_reason` 等，供过滤或人工复核） |
 | `outputs/child_dataset/audios/*.m4a` | 儿童片段音频 |
-| `outputs/assistant_responses_multiturn.jsonl` | 助手回复（含 `plain_text`、`semantic_content`、`acoustic_emotion`；多轮时历史轮以文本摘要注入，并含 `recording_dialogue_ref` 录音参考块） |
+| `outputs/assistant_responses_multiturn.jsonl` | 助手回复（含 `plain_text`、`semantic_content`、`acoustic_emotion`；多轮时每轮 API 注入“孩子 ASR + 历史轮 `plain_text`（玩伴回复）”交替文本 + 本轮音频；另含整段归档字段 `recording_dialogue_ref`） |
 | `outputs/tts_generated/*.wav` | 合成语音 |
 | `outputs/assistant_responses_with_tts.jsonl` | 带 `tts_audio` 路径的汇总 |
 | `demo_page/index.html` | 浏览器对照收听；**推荐**用 `bash demo_page/local_http.sh start` 起本地 HTTP 后打开提示的 URL（`file://` 直接打开可能无法加载 `samples_embed.json` 与音频）。`local_http.sh` 会自动探测 `PYTHON` / `python3` / `py`（含真实 `sys.executable`）/ `python`（跳过 Windows Store 占位），必要时用 `where.exe` 与 cmd 侧 PATH 对齐；仍失败可设置 `PYTHON` |
@@ -112,13 +112,12 @@ CosyVoice 使用独立虚拟环境 `artifacts/cosyvoice/.venv`（由 `deploy_cos
 
 ### 模块 2：多模态 API 如何构建 response（请求里放了什么）
 
-助手步骤由 [`scripts/assistant/generate_assistant_responses.py`](scripts/assistant/generate_assistant_responses.py) 调用 **Gemini 兼容** `generateContent`，在请求体 `contents` 中拼装多轮对话；**当前轮以儿童片段音频为主输入**，manifest 里的 `user` 等字段主要用于归档与生成**按轮截断的亲子转写参考**（与代码中 `recording_dialogue_ref` / `_dialogue_ref_text_for_turn` 一致）。**历史轮（下表「历史多轮」、流程图中 `i_hist`）**在同一样本内由脚本把**上一轮及更早轮次**的 API 返回写入 `contents`，再与本轮请求拼接；首轮 `history_turns` 为空，仅有系统指令、可选转写参考与本轮音频。
+助手步骤由 [`scripts/assistant/generate_assistant_responses.py`](scripts/assistant/generate_assistant_responses.py) 调用 **Gemini 兼容** `generateContent`。**`--mode multi` 下每一轮请求**在 `contents` 末尾为**单条** `user`：文本部分由 `_multiturn_api_history_text` 构造为「孩子 ASR」与「历史轮 API 返回的 `plain_text`（玩伴回复）」交替，并截至本轮孩子文本；随后拼接任务说明（`_full_task_text()`）与**本轮**儿童片段音频（`inline_data`）。该多轮请求文本**不再包含** manifest 中家长/片头 ASR。输出 JSONL 中的 **`recording_dialogue_ref`** 仍为**整段**亲子 ASR（`_full_dialogue_text_from_manifest`），仅用于归档与页面展示，与 API 内可见文本可不一致。
 
 | 信息类型 | 说明 |
 |----------|------|
 | **系统指令（任务与 JSON 格式）** | 人设、安全与互动要求，以及模型必须输出的字段 `semantic_content`、`acoustic_emotion`、`plain_text`（见脚本内 `SYSTEM_INSTRUCTION` / `_full_task_text()`）。 |
-| **亲子转写参考（可选）** | 片头家长话（若有）+ 截至当前轮的「孩子 / 家长(录音)」ASR 文本，冠以「历史对话&&当前轮输入语音的转录文本（仅供参考，本轮输入以语音为准）」；**多轮时不含未来轮与当前轮之后家长话**。 |
-| **历史多轮（仅 `--mode multi`）** | 已完成轮次按 **user → model** 交替写入：user 侧为上一轮模型已产出的语义/声学摘要（`【历史轮·孩子语音理解（文本摘要）】`），model 侧为该轮 `plain_text`。 |
+| **多轮历史文本（API 内，可选）** | 由 `_multiturn_api_history_text` 生成，经 `_RECORDING_CTX_HEADER` 前缀与任务文本拼入当前轮唯一 `user` 的文本 `part`；内容为「孩子 ASR + 历史轮 `plain_text`」交替，不含 manifest 家长/片头 ASR。 |
 | **当前轮儿童音频** | 本轮 `*.m4a` 经 Base64 放入 `inline_data`（默认 MIME `audio/mp4`），与上述文本在同一条 user `parts` 中一并提交。 |
 | **生成配置** | `generation_config.response_mime_type = application/json`（`_build_payload(..., json_mode=True)`）；若代理不支持可回退为非 JSON 模式再解析。可选 **`--with-google-search`** 时在请求体中增加 `tools: [{google_search: {}}]`。 |
 
