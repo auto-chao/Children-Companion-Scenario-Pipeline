@@ -127,18 +127,37 @@ flowchart TB
       r6 --> r2
       r5 -->|是| r7[Prompt 定稿]
     end
-    r7 --> r8[批量多模态 API 推理]
+    subgraph api_req [批量推理：API 请求如何构成 response]
+      i_audio["当前轮儿童片段<br/>inline_data 音频"]
+      i_sys["系统指令与 JSON 约束<br/>semantic_content acoustic_emotion plain_text"]
+      i_rec["录音对话 ASR 参考<br/>manifest 亲子转写 可选"]
+      i_hist["多轮历史 仅 multi<br/>前几轮语义声学摘要与上轮 plain_text"]
+      r8["generateContent<br/>Gemini 兼容代理批量推理"]
+    end
+    r7 --> i_sys
+    i_sys --> r8
+    s2 --> i_audio
+    s2 --> i_rec
+    s2 --> i_hist
+    i_audio --> r8
+    i_rec --> r8
+    i_hist --> r8
   end
 
   subgraph mod_tts [模块3：语音合成]
     t1[朗读 plain_text] --> t2[合成语音]
   end
 
-  s2 --> r8
   r8 --> t1
   t2 --> d1[静态 Demo 页]
 
 ```
+
+**模块 2 · API 输入与 response**：默认 `--mode multi`；单轮 `--mode single` 不注入「多轮历史」，仅有录音参考（若有）、系统指令与本轮音频。脚本 `scripts/assistant/generate_assistant_responses.py` 向代理发送 `POST …/v1beta/models/{model}:generateContent`，请求体含 `contents`、`stream: false`，并以 `generation_config.response_mime_type=application/json` 约束模型输出结构化 JSON。进入模型的信息包括：**当前轮儿童切片音频**（base64 + MIME，默认 `audio/mp4`）；**系统指令**（含三字段说明，与豆包迭代后的 Prompt 定稿在工程上对齐）；**可选录音参考块**（manifest 中孩子与家长 ASR，辅助语境）；**多轮时**在同一 manifest 样本内将前几轮 API 已返回的 `semantic_content`、`acoustic_emotion` 与 `plain_text` 以文本交替注入 `contents`。解析结果写入 `outputs/assistant_responses_multiturn.jsonl` 或单轮的 `assistant_responses_single_turn.jsonl`（字段含义见上文「输出在哪里」表）。
+
+- **multi**：除上述当前轮输入外，`contents` 中前置若干「历史轮」user（语义 + 声学摘要）与 model（上轮 `plain_text`）交替块。
+- **single**：无历史块，其余与当前轮相同。
+- 可选：传入 `--with-google-search` 时请求体可带 `tools: [{"google_search": {}}]`（视代理能力而定）。
 
 更细的**声学处理链路**（分离增强、说话人分割、ASR、多轮链接等）见源码包 `ccs_audio_pipeline`。
 
