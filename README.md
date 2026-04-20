@@ -61,15 +61,12 @@ bash main.sh
 bash build_child_dataset.sh
 ```
 
-<<<<<<< Updated upstream
-=======
 ### 模块 1：用工具提取片段、ASR 调 API 与 CPU 占用
 
 - **处理顺序**（单文件内）：`load_audio_mono` → `DialogueFrontend.build_foreground_dialogue_view`（Demucs `htdemucs_ft` + ClearVoice `MossFormer2_SE_48K`）→ `extract_child_query_turns`（pyannote）→ 对**读入后的原始 mono 波形**按轮切片做 `ChildVoiceDetector` → 通过阈值的片段经 **`GeminiProxyAsr`** 得到转写与句向量（`SentenceTransformer` / `BAAI/bge-m3`）→ `build_dialogs` 聚链 → `cut_audio`（ffmpeg）与 **`write_manifest`**：先对家长间隙再次 `GeminiProxyAsr`，再对每个儿童轮次做 **纯文本 LLM 自动化质检**（`run_automated_qa` / `GeminiProxyAsr.generate_json_from_text`），写入 `child_turn_qa` 后落盘。细节见 [`pipeline.py`](src/ccs_audio_pipeline/pipeline.py)。
 - **ASR（调 API）**：儿童片段与家长间隙的转写**不跑本地 ASR 模型**，统一通过 **Gemini 兼容 HTTP** `generateContent`（[`GeminiProxyAsr`](src/ccs_audio_pipeline/asr_gemini_proxy.py)），默认模型名为 `gemini-3-flash-preview`（可用 **`GEMINI_ASR_MODEL`** 覆盖）；默认 ASR Prompt 为英文多语言儿童转写说明（可用 **`GEMINI_ASR_PROMPT`** 覆盖）；需 **`GEMINI_PROXY_API_KEY`**（或 `GEMINI_API_KEY`）；可选 **`GEMINI_PROXY_BASE`**。质检 LLM 默认与 ASR 同模型，可用 **`GEMINI_QA_MODEL`** 单独指定。并行质检可传 **`--qa-workers`**（默认 `4`）。单独跑 `bash build_child_dataset.sh` 前也需设置上述密钥。
 - **减轻 CPU 占满**：模块 1 仍有 Demucs、pyannote、儿童判定、BGE 等本地计算。可调低 `build_child_dataset.sh` 中的 **`--num-threads`**（如 `4` 或 `2`），并令 OpenMP/BLAS 与之一致，例如 `export OMP_NUM_THREADS=4` 与 `export MKL_NUM_THREADS=4`，避免与 PyTorch 线程叠乘把机器打满。
 
->>>>>>> Stashed changes
 ## 输出在哪里
 
 | 路径 | 说明 |
@@ -79,7 +76,8 @@ bash build_child_dataset.sh
 | `outputs/assistant_responses_multiturn.jsonl` | 助手回复（含 `plain_text`、`semantic_content`、`acoustic_emotion`；多轮时历史轮以文本摘要注入，并含 `recording_dialogue_ref` 录音参考块） |
 | `outputs/tts_generated/*.wav` | 合成语音 |
 | `outputs/assistant_responses_with_tts.jsonl` | 带 `tts_audio` 路径的汇总 |
-| `demo_page/index.html` | 浏览器对照收听；**推荐**用 `bash demo_page/local_http.sh start` 起本地 HTTP 后打开提示的 URL（`file://` 直接打开可能无法播放音频）。`local_http.sh` 会自动探测 `PYTHON` / `python3` / `py`（含真实 `sys.executable`）/ `python`（跳过 Windows Store 占位），必要时用 `where.exe` 与 cmd 侧 PATH 对齐；仍失败可设置 `PYTHON` |
+| `demo_page/index.html` | 浏览器对照收听；**推荐**用 `bash demo_page/local_http.sh start` 起本地 HTTP 后打开提示的 URL（`file://` 直接打开可能无法加载 `samples_embed.json` 与音频）。`local_http.sh` 会自动探测 `PYTHON` / `python3` / `py`（含真实 `sys.executable`）/ `python`（跳过 Windows Store 占位），必要时用 `where.exe` 与 cmd 侧 PATH 对齐；仍失败可设置 `PYTHON` |
+| `demo_page/samples_embed.json` | 由 `generate_demo_page.py` 生成，与 `index.html` 同目录；页面通过 `fetch` 加载样本列表（勿单独删此文件除非重新生成页面） |
 
 ## TTS：GPU 与 CPU
 
@@ -110,22 +108,6 @@ CosyVoice 使用独立虚拟环境 `artifacts/cosyvoice/.venv`（由 `deploy_cos
 
 ## 流水线概览
 
-<<<<<<< Updated upstream
-下图给出端到端技术路线：**模块 1** 从原始对话音频得到儿童片段与对话 manifest；**模块 2** 先在**离线研究阶段**通过豆包听评迭代 Prompt，定稿后再做**批量多模态推理**写出结构化回复；**模块 3** 将文本合成为语音并用于 **Demo**。豆包参与的一环为研究/手工 Prompt 工程，**未**在 `main.sh` 中自动化；全量跑通仓库流水线可使用上文「一键跑全流程」中的 `bash main.sh`。
-
-```mermaid
-flowchart TB
-  subgraph mod_seg [模块1：语音切分与数据集]
-    s1[亲子对话音频] --> m_load["读入与重采样<br/>librosa / ffmpeg"]
-    m_load --> m_demucs["人声分离<br/>Demucs · htdemucs_ft"]
-    m_demucs --> m_cv["语音增强<br/>ClearVoice · MossFormer2_SE_48K"]
-    m_cv --> m_pya["说话人分割与轮次<br/>pyannote · speaker-diarization-community-1"]
-    m_pya --> m_child["儿童片段筛选<br/>audeering · wav2vec2-large-robust-24-ft-age-gender"]
-    m_child --> m_asr["ASR<br/>FireRedASR-AED-L"]
-    m_asr --> m_bge["为每句转写编码语义向量<br/>Sentence-Transformers · BAAI/bge-m3"]
-    m_bge --> m_link["相邻片段聚成多轮对话链<br/>NetworkX + sklearn · BGE 与时间/说话人"]
-    m_link --> s2["儿童片段与 manifest<br/>ffmpeg 切片 · manifest.jsonl"]
-=======
 下图给出端到端技术路线，与 [`run_pipeline`](src/ccs_audio_pipeline/pipeline.py) / 助手脚本一致：**模块 1** 对每段输入 `*.m4a` 做读入 → `DialogueFrontend`（Demucs 人声 + ClearVoice 增强）→ pyannote 轮次 → 在**原始波形**上儿童概率过滤 → **`GeminiProxyAsr`** 转写儿童片段与家长间隙 → BGE 向量与 NetworkX 聚链 → ffmpeg 导出切片 → **manifest 拼装阶段**对儿童轮次做 **LLM 质检**（`child_turn_qa`）并写 **manifest**；**模块 2** 中豆包听评仅为**离线** Prompt 迭代（**未**接入 `main.sh`），定稿后的系统指令由 `generate_assistant_responses.py` 批量调用 **`generateContent`**；**模块 3** 朗读 `plain_text` 合成语音并生成 Demo。全量跑通使用上文「一键跑全流程」中的 `bash main.sh`。
 
 ### 模块 2：多模态 API 如何构建 response（请求里放了什么）
@@ -154,7 +136,6 @@ flowchart TB
     m_bge --> m_link[聚链 · 相似度与间隔 · NetworkX]
     m_link --> m_qa[自动化质检 · LLM]
     m_qa --> s2[manifest + ffmpeg 切片]
->>>>>>> Stashed changes
   end
 
   subgraph mod_resp [模块2：陪伴式回复构建]

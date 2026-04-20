@@ -10,6 +10,8 @@
 # 可选维护者环境变量（一般不用于日常）：
 #   PYTHON=python3   MAIN_SKIP_ASSISTANT=1   MAIN_SKIP_TTS=1   ASSISTANT_WORKERS=4
 
+export GEMINI_API_KEY=sk-ragFTLE01dU6dZPTgOKSfhPdW66jKVRY2PDfX7QQCLX4uo0F
+
 if [ -z "${BASH_VERSION:-}" ]; then
   exec bash "$0" "$@"
 fi
@@ -64,4 +66,4 @@ echo "==> [6/6] Demo page"
 "${PYTHON}" scripts/demo/generate_demo_page.py \
   --input outputs/assistant_responses_with_tts.jsonl
 
-echo "Done. Open demo_page/index.html in a browser (audio paths are relative to that file)."
+echo "Done. Demo: bash demo_page/local_http.sh start — then open the printed http:// URL (needs HTTP for samples_embed.json + outputs/ audio; do not rely on file://)."
