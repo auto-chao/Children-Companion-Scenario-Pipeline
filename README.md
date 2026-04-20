@@ -165,4 +165,4 @@ flowchart TB
 
 ## 第三方模型与许可
 
-本仓库代码以 **Apache-2.0** 发布（见 [`LICENSE`](LICENSE)）。依赖的 **Demucs、pyannote、CosyVoice、FireRedASR、Sentence-Transformers、BGE** 等第三方权重各有原始许可证与条款；用于研究或产品前请自行阅读并遵守。生成内容不代表任何机构观点。
+本仓库代码以 **Apache-2.0** 发布（见 [`LICENSE`](LICENSE)）。依赖的 **Demucs、pyannote、CosyVoice、第三方 Gemini 兼容代理（ASR/质检等 HTTP 调用）、Sentence-Transformers、BGE** 等本地模型权重与远程服务各有原始许可证或服务条款；用于研究或产品前请自行阅读并遵守。生成内容不代表任何机构观点。
