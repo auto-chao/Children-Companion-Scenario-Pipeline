@@ -125,19 +125,19 @@ CosyVoice 使用独立虚拟环境 `artifacts/cosyvoice/.venv`（由 `deploy_cos
 
 ```mermaid
 flowchart TB
-  subgraph mod_seg [模块1：语音切分与数据集 · run_pipeline]
-    s1["亲子对话音频 · data/audio/*.m4a"] --> m_load["读入 mono 波形<br/>load_audio_mono · librosa 优先 失败则 ffmpeg PCM"]
-    m_load --> m_fg["前景 DialogueFrontend<br/>Demucs htdemucs_ft vocals → ClearVoice MossFormer2_SE_48K<br/>见 dialogue_frontend.py 与 asset_config 中 CLEARVOICE_*"]
-    m_fg --> m_pya["说话人轮次 · extract_child_query_turns<br/>pyannote.audio Pipeline · speaker-diarization-community-1"]
-    m_pya --> m_child["儿童轮次筛选 ChildVoiceDetector<br/>audeering/wav2vec2-large-robust-24-ft-age-gender · p_child ≥ child_threshold<br/>切片来自读入后的原始波形 非增强轨"]
-    m_child --> m_asr["儿童片段转写 GeminiProxyAsr<br/>generateContent · 默认 gemini-3-flash-preview"]
-    m_asr --> m_bge["句向量 · SentenceTransformer<br/>BAAI/bge-m3 本地权重"]
-    m_bge --> m_link["会话链 build_dialogs / build_link_graph<br/>sklearn cosine_similarity + 间隔与说话人加权 · NetworkX 连通分量 · max_turns 切块"]
-    m_link --> s2["manifest.jsonl + audios/*.m4a<br/>cut_audio ffmpeg AAC · write_manifest 家长间隙 ASR 同 GeminiProxyAsr"]
+  subgraph mod_seg [模块1：数据集 pipeline]
+    s1[亲子对话 m4a] --> m_load[读入 mono · librosa/ffmpeg]
+    m_load --> m_fg[前景：Demucs + ClearVoice]
+    m_fg --> m_pya[pyannote 说话人轮次]
+    m_pya --> m_child[儿童筛选 · 原波形切片]
+    m_child --> m_asr[儿童片段 ASR · Gemini 代理]
+    m_asr --> m_bge[BGE-m3 句向量]
+    m_bge --> m_link[聚链 · 相似度与间隔 · NetworkX]
+    m_link --> s2[manifest + ffmpeg 切片]
   end
 
   subgraph mod_resp [模块2：陪伴式回复构建]
-    subgraph loop_doubao [离线研究：豆包参与 Prompt 迭代 · 未接入 main.sh]
+    subgraph loop_doubao [豆包 Prompt 迭代（离线）]
       r1[设计初始 Prompt] --> r2[多模态生成回复]
       r2 --> r3[试听儿童与助手语音]
       r3 --> r4[豆包评判与优化建议]
@@ -146,12 +146,12 @@ flowchart TB
       r6 --> r2
       r5 -->|是| r7[Prompt 定稿]
     end
-    subgraph api_req [批量推理 · generate_assistant_responses.py]
-      i_audio["当前轮儿童片段 inline_data<br/>MIME 默认 audio/mp4"]
-      i_sys["SYSTEM_INSTRUCTION + _full_task_text<br/>JSON 三字段约束"]
-      i_rec["亲子转写参考 可选<br/>_RECORDING_CTX_HEADER + _dialogue_ref_text_for_turn"]
-      i_hist["多轮 history_turns · 仅 multi<br/>_history_user_text + 上轮 plain_text"]
-      r8["POST .../v1beta/models/{model}:generateContent<br/>与 ASR 同源代理 GEMINI_PROXY_BASE"]
+    subgraph api_req [批量推理 API]
+      i_audio[inline_data 本轮音频]
+      i_sys[系统指令与 JSON]
+      i_rec[亲子转写参考（可选）]
+      i_hist[多轮历史（multi）]
+      r8[Gemini 兼容 generateContent]
     end
     r7 --> i_sys
     i_sys --> r8
@@ -172,7 +172,7 @@ flowchart TB
 
 ```
 
-实现与默认参数见 [`src/ccs_audio_pipeline/pipeline.py`](src/ccs_audio_pipeline/pipeline.py)、[`dialogue_frontend.py`](src/ccs_audio_pipeline/dialogue_frontend.py)、[`asset_config.py`](src/ccs_audio_pipeline/asset_config.py)；助手请求体拼装见 [`scripts/assistant/generate_assistant_responses.py`](scripts/assistant/generate_assistant_responses.py)。上文「模块 2」表格与各 `i_*` 节点对应。
+图中为步骤简称；实现细节见上文「模块 2」表格及 [`pipeline.py`](src/ccs_audio_pipeline/pipeline.py)、[`dialogue_frontend.py`](src/ccs_audio_pipeline/dialogue_frontend.py)、[`asset_config.py`](src/ccs_audio_pipeline/asset_config.py)、[`generate_assistant_responses.py`](scripts/assistant/generate_assistant_responses.py)。
 
 ## 第三方模型与许可
 
