@@ -23,19 +23,19 @@ cd "${SCRIPT_DIR}"
 
 PYTHON="${PYTHON:-python}"
 
-echo "==> [1/6] Offline assets check"
-if ! "${PYTHON}" scripts/bootstrap_assets.py --check-only; then
-  echo "请先下载离线资产，例如: export HF_TOKEN=你的token && ${PYTHON} scripts/bootstrap_assets.py" >&2
-  exit 1
-fi
+# echo "==> [1/6] Offline assets check"
+# if ! "${PYTHON}" scripts/bootstrap_assets.py --check-only; then
+#   echo "请先下载离线资产，例如: export HF_TOKEN=你的token && ${PYTHON} scripts/bootstrap_assets.py" >&2
+#   exit 1
+# fi
 
-echo "==> [2/6] Child dataset (build_child_dataset.sh)"
-bash build_child_dataset.sh
+# echo "==> [2/6] Child dataset (build_child_dataset.sh)"
+# bash build_child_dataset.sh
 
-if [ -n "${MAIN_SKIP_ASSISTANT:-}" ]; then
-  echo "==> Skipping assistant / TTS / demo (MAIN_SKIP_ASSISTANT is set)"
-  exit 0
-fi
+# if [ -n "${MAIN_SKIP_ASSISTANT:-}" ]; then
+#   echo "==> Skipping assistant / TTS / demo (MAIN_SKIP_ASSISTANT is set)"
+#   exit 0
+# fi
 
 echo "==> [3/6] Assistant responses (Gemini-compatible proxy)"
 if [ -z "${GEMINI_PROXY_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then

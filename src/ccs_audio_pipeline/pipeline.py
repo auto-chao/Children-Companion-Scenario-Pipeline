@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import importlib
 import json
 import os
@@ -43,40 +42,6 @@ from ccs_audio_pipeline.gpu_runtime import configure_cuda_backends, resolve_torc
 from ccs_audio_pipeline.turn_extraction import extract_child_query_turns
 
 DEFAULT_SAMPLE_RATE = 16000
-
-QA_SYSTEM_INSTRUCTION = (
-"你是一个亲子对话语音数据集的质检机器人。你的任务是根据对话上下文检测语音识别（ASR）错误或幻觉。儿童的语音可能语法不正确或coding switch，这是可以接受的。但由糟糕音频导致的完全胡言乱语或莫名其妙的前言不搭后语是不可接受的。返回一个包含两个字段的 JSON：'qa_pass'（布尔值）和 'reason'（字符串）。"
-)
-
-
-def parent_text_for_manifest_turn(line: dict[str, Any], turn_1based: int) -> str:
-    """上一轮家长 ASR 文本（与 manifest 键名一致，turn 为 1-based 儿童轮次）。"""
-    if turn_1based == 1:
-        return str(line.get("recording_prefix_adult") or "")
-    if turn_1based == 2:
-        return str(line.get("assistant") or "")
-    return str(line.get(f"assistant_{turn_1based - 1}") or "")
-
-
-def run_automated_qa(
-    *,
-    parent_text: str,
-    child_text: str,
-    asr_client: GeminiProxyAsr,
-) -> tuple[str, str]:
-    """单级 LLM 质检：返回 (qa_status, qa_reason)。"""
-    try:
-        obj = asr_client.generate_json_from_text(
-            system_instruction=QA_SYSTEM_INSTRUCTION,
-            user_text=f"Parent said: {parent_text}\nChild replied: {child_text}",
-        )
-        qa_pass = obj.get("qa_pass")
-        reason = str(obj.get("reason") or "")
-        if qa_pass is True:
-            return "pass", reason
-        return "reject", reason or "qa_pass is false or missing"
-    except Exception as e:
-        return "reject", f"qa_llm_error: {e}"
 
 
 @dataclass
@@ -241,12 +206,6 @@ def run_pipeline() -> None:
         "--no-gpu-fast",
         action="store_true",
         help="Disable CUDA throughput tweaks (no pyannote on GPU, no cuDNN autotune/TF32). For debugging.",
-    )
-    parser.add_argument(
-        "--qa-workers",
-        type=int,
-        default=4,
-        help="并行 LLM 质检（每儿童轮次）的 worker 数；设为 1 则串行。",
     )
     args = parser.parse_args()
 
@@ -498,7 +457,6 @@ def run_pipeline() -> None:
         gap_min_sec=args.gap_asr_min_sec,
         gap_max_sec=args.gap_asr_max_sec,
         suffix_max_sec=args.suffix_asr_max_sec,
-        qa_workers=max(1, args.qa_workers),
     )
     print(f"Done: {manifest_path}")
     print(f"Done: {audios_dir}")
@@ -828,9 +786,8 @@ def write_manifest(
     gap_min_sec: float,
     gap_max_sec: float,
     suffix_max_sec: float,
-    qa_workers: int = 4,
 ) -> None:
-    """写入 manifest；assistant 槽位为相邻两轮儿童语音之间（或片尾）的大人语音 ASR；含每轮 LLM QA。"""
+    """写入 manifest；assistant 槽位为相邻两轮儿童语音之间（或片尾）的大人语音 ASR。"""
     with path.open("w", encoding="utf-8") as f:
         for dialog in dialogs:
             if not dialog:
@@ -889,37 +846,4 @@ def write_manifest(
                 line["messages"].append({"role": "user", "text": seg.transcript})
                 line["messages"].append({"role": "assistant", "text": assistant_text})
 
-            n_turns = len(dialog)
-            turns = list(range(1, n_turns + 1))
-
-            def _qa_one(ti: int, seg: Segment) -> tuple[int, str, str]:
-                pt = parent_text_for_manifest_turn(line, ti)
-                st, rs = run_automated_qa(
-                    parent_text=pt,
-                    child_text=seg.transcript,
-                    asr_client=asr,
-                )
-                return ti, st, rs
-
-            if qa_workers <= 1:
-                child_turn_qa = []
-                for ti, seg in zip(turns, dialog, strict=True):
-                    _, st, rs = _qa_one(ti, seg)
-                    child_turn_qa.append({"qa_reason": rs, "qa_status": st, "turn": ti})
-            else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=qa_workers) as ex:
-                    futures = [
-                        ex.submit(_qa_one, ti, seg)
-                        for ti, seg in zip(turns, dialog, strict=True)
-                    ]
-                    by_turn: dict[int, tuple[str, str]] = {}
-                    for fut in concurrent.futures.as_completed(futures):
-                        ti, st, rs = fut.result()
-                        by_turn[ti] = (st, rs)
-                child_turn_qa = [
-                    {"qa_reason": by_turn[ti][1], "qa_status": by_turn[ti][0], "turn": ti}
-                    for ti in turns
-                ]
-
-            line["child_turn_qa"] = child_turn_qa
             f.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")

@@ -63,15 +63,15 @@ bash build_child_dataset.sh
 
 ### 模块 1：用工具提取片段、ASR 调 API 与 CPU 占用
 
-- **处理顺序**（单文件内）：`load_audio_mono` → `DialogueFrontend.build_foreground_dialogue_view`（Demucs `htdemucs_ft` + ClearVoice `MossFormer2_SE_48K`）→ `extract_child_query_turns`（pyannote）→ 对**读入后的原始 mono 波形**按轮切片做 `ChildVoiceDetector` → 通过阈值的片段经 **`GeminiProxyAsr`** 得到转写与句向量（`SentenceTransformer` / `BAAI/bge-m3`）→ `build_dialogs` 聚链 → `cut_audio`（ffmpeg）与 **`write_manifest`**：先对家长间隙再次 `GeminiProxyAsr`，再对每个儿童轮次做 **纯文本 LLM 自动化质检**（`run_automated_qa` / `GeminiProxyAsr.generate_json_from_text`），写入 `child_turn_qa` 后落盘。细节见 [`pipeline.py`](src/ccs_audio_pipeline/pipeline.py)。
-- **ASR（调 API）**：儿童片段与家长间隙的转写**不跑本地 ASR 模型**，统一通过 **Gemini 兼容 HTTP** `generateContent`（[`GeminiProxyAsr`](src/ccs_audio_pipeline/asr_gemini_proxy.py)），默认模型名为 `gemini-3-flash-preview`（可用 **`GEMINI_ASR_MODEL`** 覆盖）；默认 ASR Prompt 为英文多语言儿童转写说明（可用 **`GEMINI_ASR_PROMPT`** 覆盖）；需 **`GEMINI_PROXY_API_KEY`**（或 `GEMINI_API_KEY`）；可选 **`GEMINI_PROXY_BASE`**。质检 LLM 默认与 ASR 同模型，可用 **`GEMINI_QA_MODEL`** 单独指定。并行质检可传 **`--qa-workers`**（默认 `4`）。单独跑 `bash build_child_dataset.sh` 前也需设置上述密钥。
+- **处理顺序**（单文件内）：`load_audio_mono` → `DialogueFrontend.build_foreground_dialogue_view`（Demucs `htdemucs_ft` + ClearVoice `MossFormer2_SE_48K`）→ `extract_child_query_turns`（pyannote）→ 对**读入后的原始 mono 波形**按轮切片做 `ChildVoiceDetector` → 通过阈值的片段经 **`GeminiProxyAsr`** 得到转写与句向量（`SentenceTransformer` / `BAAI/bge-m3`）→ `build_dialogs` 聚链 → `cut_audio`（ffmpeg）与 **`write_manifest`**：对家长间隙再次 `GeminiProxyAsr`，拼装 `user`/`assistant`/`messages` 等字段后落盘。细节见 [`pipeline.py`](src/ccs_audio_pipeline/pipeline.py)。
+- **ASR（调 API）**：儿童片段与家长间隙的转写**不跑本地 ASR 模型**，统一通过 **Gemini 兼容 HTTP** `generateContent`（[`GeminiProxyAsr`](src/ccs_audio_pipeline/asr_gemini_proxy.py)），默认模型名为 `gemini-3-flash-preview`（可用 **`GEMINI_ASR_MODEL`** 覆盖）；默认 ASR Prompt 为英文多语言儿童转写说明（可用 **`GEMINI_ASR_PROMPT`** 覆盖）；需 **`GEMINI_PROXY_API_KEY`**（或 `GEMINI_API_KEY`）；可选 **`GEMINI_PROXY_BASE`**。单独跑 `bash build_child_dataset.sh` 前也需设置上述密钥。
 - **减轻 CPU 占满**：模块 1 仍有 Demucs、pyannote、儿童判定、BGE 等本地计算。可调低 `build_child_dataset.sh` 中的 **`--num-threads`**（如 `4` 或 `2`），并令 OpenMP/BLAS 与之一致，例如 `export OMP_NUM_THREADS=4` 与 `export MKL_NUM_THREADS=4`，避免与 PyTorch 线程叠乘把机器打满。
 
 ## 输出在哪里
 
 | 路径 | 说明 |
 |------|------|
-| `outputs/child_dataset/manifest.jsonl` | 多轮对话样本；除儿童片段 ASR（`user`/`user_*`）外，含相邻两轮之间（及片尾）**家长说话 ASR**（`assistant`/`assistant_*`），可选片头 `recording_prefix_adult`；每样本含 **`child_turn_qa`**（每儿童轮次 `qa_status` / `qa_reason` 等，供过滤或人工复核） |
+| `outputs/child_dataset/manifest.jsonl` | 多轮对话样本；除儿童片段 ASR（`user`/`user_*`）外，含相邻两轮之间（及片尾）**家长说话 ASR**（`assistant`/`assistant_*`），可选片头 `recording_prefix_adult` |
 | `outputs/child_dataset/audios/*.m4a` | 儿童片段音频 |
 | `outputs/assistant_responses_multiturn.jsonl` | 助手回复（含 `plain_text`、`semantic_content`、`acoustic_emotion`；多轮时每轮 API 注入“孩子 ASR + 历史轮 `plain_text`（玩伴回复）”交替文本 + 本轮音频；另含整段归档字段 `recording_dialogue_ref`） |
 | `outputs/tts_generated/*.wav` | 合成语音 |
@@ -108,7 +108,7 @@ CosyVoice 使用独立虚拟环境 `artifacts/cosyvoice/.venv`（由 `deploy_cos
 
 ## 流水线概览
 
-下图给出端到端技术路线，与 [`run_pipeline`](src/ccs_audio_pipeline/pipeline.py) / 助手脚本一致：**模块 1** 对每段输入 `*.m4a` 做读入 → `DialogueFrontend`（Demucs 人声 + ClearVoice 增强）→ pyannote 轮次 → 在**原始波形**上儿童概率过滤 → **`GeminiProxyAsr`** 转写儿童片段与家长间隙 → BGE 向量与 NetworkX 聚链 → ffmpeg 导出切片 → **manifest 拼装阶段**对儿童轮次做 **LLM 质检**（`child_turn_qa`）并写 **manifest**；**模块 2** 中豆包听评仅为**离线** Prompt 迭代（**未**接入 `main.sh`），定稿后的系统指令由 `generate_assistant_responses.py` 批量调用 **`generateContent`**；**模块 3** 朗读 `plain_text` 合成语音并生成 Demo。全量跑通使用上文「一键跑全流程」中的 `bash main.sh`。
+下图给出端到端技术路线，与 [`run_pipeline`](src/ccs_audio_pipeline/pipeline.py) / 助手脚本一致：**模块 1** 对每段输入 `*.m4a` 做读入 → `DialogueFrontend`（Demucs 人声 + ClearVoice 增强）→ pyannote 轮次 → 在**原始波形**上儿童概率过滤 → **`GeminiProxyAsr`** 转写儿童片段与家长间隙 → BGE 向量与 NetworkX 聚链 → ffmpeg 导出切片 → **manifest 拼装**并写 **manifest**；**模块 2** 中豆包听评仅为**离线** Prompt 迭代（**未**接入 `main.sh`），定稿后的系统指令由 `generate_assistant_responses.py` 批量调用 **`generateContent`**；**模块 3** 朗读 `plain_text` 合成语音并生成 Demo。全量跑通使用上文「一键跑全流程」中的 `bash main.sh`。
 
 ### 模块 2：多模态 API 如何构建 response（请求里放了什么）
 
@@ -133,8 +133,7 @@ flowchart TB
     m_child --> m_asr[儿童片段 ASR · Gemini 代理]
     m_asr --> m_bge[BGE-m3 句向量]
     m_bge --> m_link[聚链 · 相似度与间隔 · NetworkX]
-    m_link --> m_qa[自动化质检 · LLM]
-    m_qa --> s2[manifest + ffmpeg 切片]
+    m_link --> s2[manifest + ffmpeg 切片]
   end
 
   subgraph mod_resp [模块2：陪伴式回复构建]
@@ -164,4 +163,4 @@ flowchart TB
 
 ## 第三方模型与许可
 
-本仓库代码以 **Apache-2.0** 发布（见 [`LICENSE`](LICENSE)）。依赖的 **Demucs、pyannote、CosyVoice、第三方 Gemini 兼容代理（ASR/质检等 HTTP 调用）、Sentence-Transformers、BGE** 等本地模型权重与远程服务各有原始许可证或服务条款；用于研究或产品前请自行阅读并遵守。生成内容不代表任何机构观点。
+本仓库代码以 **Apache-2.0** 发布（见 [`LICENSE`](LICENSE)）。依赖的 **Demucs、pyannote、CosyVoice、第三方 Gemini 兼容代理（ASR 等 HTTP 调用）、Sentence-Transformers、BGE** 等本地模型权重与远程服务各有原始许可证或服务条款；用于研究或产品前请自行阅读并遵守。生成内容不代表任何机构观点。
