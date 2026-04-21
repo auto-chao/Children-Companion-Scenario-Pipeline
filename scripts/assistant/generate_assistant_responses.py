@@ -6,8 +6,8 @@
 与 ``api_call/api_call_final.py`` 一致：请求体中带 **inline_data 音频**（m4a），由多模态模型
 理解儿童语音并生成回复。manifest 中的 ``user`` 等为归档/对齐；**当前轮**仍以音频为主输入。
 
-多轮模式（``--mode multi``）：每一轮 API 请求在 ``contents`` 末尾为单条 ``user``：**孩子 ASR 历史 + 历史轮 API 的 plain_text（玩伴回复）**，一直到本轮孩子话，再拼任务说明与**本轮**儿童音频 ``inline_data``；不再注入录音中的家长 ASR。
-模型 JSON 仍含 ``semantic_content``、``acoustic_emotion``、``plain_text``；输出 JSONL 中 ``recording_dialogue_ref`` 仍为**整段** manifest 转写便于归档。
+多轮模式（``--mode multi``）：每一轮 API 请求在 ``contents`` 末尾为单条 ``user``：**孩子侧文本历史**（与 manifest 人工转写一致）**+ 历史轮 API 的 plain_text（玩伴回复）**，一直到本轮孩子话，再拼任务说明与**本轮**儿童音频 ``inline_data``；不再注入录音中的家长 ASR。
+模型 JSON 仍含 ``semantic_content``、``acoustic_emotion``、``plain_text``；输出 JSONL 中 ``recording_dialogue_ref`` 仍为**整段** manifest 对话参考（儿童人工、家长等为 ASR）便于归档。
 
 调用经 ``local_api_logger.wrap_requests_call`` 记录到 ``api_call/api_logs/``。
 
