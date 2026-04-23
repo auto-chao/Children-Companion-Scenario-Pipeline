@@ -37,7 +37,7 @@ def _fix_ssl_cert_env() -> None:
 
 # ========== 可修改：与此前 .env 中 gptplus5 配置相同，无需 .env 即可运行 ==========
 _API_KEY = "sk-ragFTLE01dU6dZPTgOKSfhPdW66jKVRY2PDfX7QQCLX4uo0F"
-_OPENAI_BASE_URL = "https://az.gptplus5.com/v1"
+_OPENAI_BASE_URL = "http://azpro.xunxkj.cn/v1"
 # ===================================================================================
 
 
