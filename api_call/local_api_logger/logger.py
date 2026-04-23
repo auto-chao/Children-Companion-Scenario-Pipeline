@@ -189,6 +189,12 @@ class APILogger:
             token_usage["prompt_tokens"] = usage.get("promptTokenCount", 0)
             token_usage["completion_tokens"] = usage.get("candidatesTokenCount", 0)
             token_usage["total_tokens"] = usage.get("totalTokenCount", 0)
+        elif "usage" in response_data and response_data["usage"] is not None:
+            usage = response_data["usage"]
+            if isinstance(usage, dict):
+                token_usage["prompt_tokens"] = int(usage.get("prompt_tokens") or 0)
+                token_usage["completion_tokens"] = int(usage.get("completion_tokens") or 0)
+                token_usage["total_tokens"] = int(usage.get("total_tokens") or 0)
 
         return token_usage
 
@@ -206,3 +212,7 @@ def set_log_dir(log_dir: str):
     """设置全局日志目录"""
     global _default_logger
     _default_logger = APILogger(log_dir)
+    # log_completion / wrap_requests_call 走 APITracker，需同步其引用的 logger
+    from . import tracker as _tr
+
+    _tr._default_tracker.logger = _default_logger

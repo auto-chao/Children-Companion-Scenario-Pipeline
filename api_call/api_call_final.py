@@ -12,11 +12,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 # ============ 配置区 ============
 # 相对项目根目录的本地音频（m4a）；ASR 由多模态模型完成
-AUDIO_REL = Path("outputs") / "child_dataset" / "audios" / (
-    "video2_放学的路上，聊天把妹妹聊哭了_0_0004_37257_53609.m4a"
+AUDIO_REL = Path("api_call") / (
+    "demo.m4a"
 )
 AUDIO_MIME = "audio/mp4"  # 若网关报错可改为 audio/x-m4a
-ASR_PROMPT = "请转写这段音频中的语音内容，按时间顺序输出文字，不要添加无关说明。"
+ASR_PROMPT = "请将这段音频的内容转为文字。"
 # ================================
 STREAM_KEY = False
 
