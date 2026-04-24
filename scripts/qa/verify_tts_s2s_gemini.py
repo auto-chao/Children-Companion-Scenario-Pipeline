@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Stage 3.5：对 TTS 后 JSONL 中（孩子 query + 玩伴 plain_text）做 s2s 质量与适宜性校验（Gemini，不修改 api_call/ 下文件）。
+仅 passed 的样本写入 ``assistant_responses_with_tts.qc_passed.jsonl``，与输入行一一对应（含 manifest_line）。
 """
 from __future__ import annotations
 
@@ -17,6 +18,9 @@ _ROOT = next(
     (p for p in _REPO.parents if (p / "pyproject.toml").is_file()),
     _REPO.parents[3],
 )
+_QA = _REPO.parent
+if str(_QA) not in sys.path:
+    sys.path.insert(0, str(_QA))
 _API = _ROOT / "api_call"
 if str(_API) not in sys.path:
     sys.path.insert(0, str(_API))
@@ -28,9 +32,11 @@ import local_api_logger.tracker as _tr  # noqa: E402
 
 _tr._default_tracker.logger = _lm._default_logger
 from local_api_logger import wrap_requests_call  # noqa: E402
+from qc_parse import is_qc_passed, parse_qc_json_text  # noqa: E402
 
 _DEFAULT_IN = _ROOT / "outputs" / "assistant_responses_with_tts.jsonl"
 _DEFAULT_OUT = _ROOT / "outputs" / "qa" / "stage3_5_gemini_qc.jsonl"
+_DEFAULT_PASSED = _ROOT / "outputs" / "assistant_responses_with_tts.qc_passed.jsonl"
 _DEFAULT_BASE = "http://azpro.xunxkj.cn"
 _MODEL = "gemini-3.1-pro-preview"
 HEADERS = {"Content-Type": "application/json"}
@@ -87,6 +93,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", type=Path, default=_DEFAULT_IN)
     ap.add_argument("--output", type=Path, default=_DEFAULT_OUT)
+    ap.add_argument(
+        "--qc-passed-out",
+        type=Path,
+        default=_DEFAULT_PASSED,
+        help="仅写入 passed=true 的 TTS 输出行（与 --input 同 schema）",
+    )
     ap.add_argument("--base", type=str, default=_DEFAULT_BASE)
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
@@ -96,11 +108,15 @@ def main() -> int:
         return 1
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.qc_passed_out.parent.mkdir(parents=True, exist_ok=True)
     base = args.base.rstrip("/")
     api_key = _proxy_key()
     url = f"{base}/v1beta/models/{_MODEL}:generateContent?key={api_key}"
     n = 0
-    with args.input.open("r", encoding="utf-8") as fin, args.output.open("w", encoding="utf-8") as fout:
+    n_passed = 0
+    with args.input.open("r", encoding="utf-8") as fin, args.output.open("w", encoding="utf-8") as fout, args.qc_passed_out.open(
+        "w", encoding="utf-8"
+    ) as fpass:
         for line in fin:
             line = line.strip()
             if not line:
@@ -132,16 +148,37 @@ def main() -> int:
                 verify=False,
             )
             text = _extract_text(resp)
-            out = {
+            parsed = parse_qc_json_text(text)
+            out: dict[str, Any] = {
                 "manifest_line": ml,
                 "raw_qc": text,
+                "passed": parsed.get("passed"),
+                "summary": parsed.get("summary", ""),
+                "issues": parsed.get("issues", []),
             }
+            pe = parsed.get("parse_error")
+            if pe:
+                out["parse_error"] = pe
             fout.write(json.dumps(out, ensure_ascii=False) + "\n")
             n += 1
+            if is_qc_passed(parsed):
+                fpass.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                n_passed += 1
             if args.limit and n >= args.limit:
                 break
 
+    print(f"Stage 3.5 QC 行数={n}，通过={n_passed} -> {args.qc_passed_out}")
     print(f"Wrote {n} rows -> {args.output}")
+    if n > 0 and n_passed == 0:
+        print(
+            "\n"
+            "================================================================\n"
+            "【警告】Stage 3.5：本批有质检样本但 0 条通过。\n"
+            f"  请检查: {args.output}\n"
+            f"  若需可交付子集: {args.qc_passed_out}（当前为空或应忽略）\n"
+            "================================================================\n",
+            file=sys.stderr,
+        )
     return 0
 
 

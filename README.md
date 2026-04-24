@@ -6,9 +6,9 @@
 
 - **Stage 1**：本地声学管线（分离 / 增强 / 说话人 / 儿童检测 / 切段）→ 儿童片段 **Qwen** 转写 → 句向量聚链 → `manifest.jsonl`（无家长间隙 ASR）。
 - **Stage 2**：Gemini 兼容 **`generateContent`**，以儿童音频 + 文本历史生成结构化 JSON 回复（默认模型名由代理侧提供，见下表）。
-- **Stage 2.5**：对助手 JSONL 调 **GPT‑5.4** 做规则符合性质检。
-- **Stage 3**：**CosyVoice** 对每轮 `plain_text` 做 zero-shot TTS。
-- **Stage 3.5**：对「孩子 query + 玩伴回复」文本调 **Gemini** 做 s2s 适宜性质检。
+- **Stage 2.5**：对助手 JSONL 调 **GPT‑5.4** 做规则符合性质检；**仅** `passed: true` 的整行会写入 `assistant_responses_multiturn.qc_passed.jsonl` 并进入 TTS。解析失败或 `passed: false` 的样本不进入「含语音」阶段。
+- **Stage 3**：**CosyVoice** 对每轮 `plain_text` 做 zero-shot TTS（**输入为** 2.5 筛过后的 `.qc_passed.jsonl`）。
+- **Stage 3.5**：对「孩子 query + 玩伴回复」文本调 **Gemini** 做 s2s 适宜性质检；**仅** 通过 3.5 的 TTS 输出行写入 `assistant_responses_with_tts.qc_passed.jsonl`，作语音侧 gate 后的交付子集。
 
 入口脚本：**[`main.sh`](main.sh)**（Git Bash / WSL / Linux / macOS）。远程 API 调用日志落在 **`api_call/api_logs/`**（由 `api_call` 内 logger 记录；流水线通过 `sys.path` 引用该目录下模块，**请勿在发行版中修改 `api_call/` 内实现**——若需换端点或密钥，请通过环境变量与代理配置处理）。
 
@@ -69,7 +69,7 @@ export ASSISTANT_WORKERS=4
 bash main.sh
 ```
 
-**执行顺序**：资产检查 → **Stage 1**（[`build_child_dataset.sh`](build_child_dataset.sh)：`--step 1` → Qwen → 可选人工断点 → `--step 2`）→ **Stage 2**（[`run_assistant_responses.sh`](run_assistant_responses.sh)）→ **Stage 2.5**（[`scripts/qa/verify_assistant_responses_gpt54.py`](scripts/qa/verify_assistant_responses_gpt54.py)）→ CosyVoice 虚拟环境（若缺失则 `deploy_cosyvoice.py`）→ **Stage 3**（[`run_tts.sh`](run_tts.sh)）→ **Stage 3.5**（[`scripts/qa/verify_tts_s2s_gemini.py`](scripts/qa/verify_tts_s2s_gemini.py)）。
+**执行顺序**：资产检查 → **Stage 1**（[`build_child_dataset.sh`](build_child_dataset.sh)：`--step 1` → Qwen → 可选人工断点 → `--step 2`）→ **Stage 2**（[`run_assistant_responses.sh`](run_assistant_responses.sh)）→ **Stage 2.5**（[`scripts/qa/verify_assistant_responses_gpt54.py`](scripts/qa/verify_assistant_responses_gpt54.py)）→（若 2.5 本批有质检行但 0 条通过则**退出码 2**，`main.sh` 终止、**不**跑 TTS）→ CosyVoice 虚拟环境（若缺失则 `deploy_cosyvoice.py`）→ **Stage 3**（[`run_tts.sh`](run_tts.sh)，读 `*.qc_passed.jsonl`）→ **Stage 3.5**（[`scripts/qa/verify_tts_s2s_gemini.py`](scripts/qa/verify_tts_s2s_gemini.py)；若 3.5 本批 0 条通过则流水线仍以 **退出码 0** 结束，**stderr 会打醒目警告**，请查 `outputs/qa/stage3_5_gemini_qc.jsonl`）。
 
 ### 人工校验 ASR（可选）
 
@@ -99,11 +99,13 @@ bash main.sh
 | `outputs/child_dataset/child_labels.template.jsonl` | `--step 1` 模板 |
 | `outputs/child_dataset/child_labels.asr.jsonl` | Qwen 机转写 `content` |
 | `outputs/child_dataset/child_labels.filled.jsonl` | 人工校对后（若启用） |
-| `outputs/assistant_responses_multiturn.jsonl` | 助手多轮结果 |
-| `outputs/qa/stage2_5_gpt54_qc.jsonl` | Stage 2.5 质检 |
+| `outputs/assistant_responses_multiturn.jsonl` | 助手多轮全量（Stage 2 产物） |
+| `outputs/assistant_responses_multiturn.qc_passed.jsonl` | **2.5 通过子集**（与上行 schema 相同；**Stage 3 TTS 唯一输入**） |
+| `outputs/qa/stage2_5_gpt54_qc.jsonl` | Stage 2.5 每行质检详情（`passed` / `raw_qc` / 可选 `parse_error`） |
 | `outputs/tts_generated/*.wav` | 合成音频 |
-| `outputs/assistant_responses_with_tts.jsonl` | 含 `tts_audio` 的汇总 |
-| `outputs/qa/stage3_5_gemini_qc.jsonl` | Stage 3.5 质检 |
+| `outputs/assistant_responses_with_tts.jsonl` | 含 `tts_audio` 的汇总（2.5 子集上合成） |
+| `outputs/assistant_responses_with_tts.qc_passed.jsonl` | **3.5 通过子集**（语音侧 gate 后可交付，与上行 schema 同） |
+| `outputs/qa/stage3_5_gemini_qc.jsonl` | Stage 3.5 每行质检详情 |
 | `api_call/api_logs/` | 远程 API 请求归档 |
 
 ## 架构与数据流
@@ -143,40 +145,53 @@ flowchart TB
     gmod --> ar_out
   end
 
-  subgraph st25 [Stage2_5_QC]
+  subgraph st25 [Stage2_5_QC_gate]
     direction TB
-    v2["verify_assistant_responses_gpt54.py"]
-    gpt["api_call_gpt54 gpt-5.4 + criteria_text"]
-    qc2["outputs/qa/stage2_5_gpt54_qc.jsonl"]
+    v2["verify_gpt54"]
+    gpt["gpt-5.4 criteria"]
+    qc2["stage2_5_gpt54_qc.jsonl"]
+    ar_ok["multiturn.qc_passed.jsonl"]
+    drp25["drop_or_reject_2.5"]
     v2 --> gpt --> qc2
+    v2 -->|passed| ar_ok
+    v2 -->|fail_or_parse| drp25
   end
 
   subgraph st3 [Stage3_TTS]
     direction TB
     rtts["run_tts.sh batch_cosyvoice_tts.py"]
     cosy["CosyVoice Fun-CosyVoice3-0.5B venv"]
-    ttsout["assistant_responses_with_tts.jsonl tts_generated wav"]
+    ttsout["assistant_responses_with_tts.jsonl tts_wav"]
     rtts --> cosy --> ttsout
   end
 
-  subgraph st35 [Stage3_5_QC]
+  subgraph st35 [Stage3_5_QC_gate]
     direction TB
-    v3["verify_tts_s2s_gemini.py"]
-    gm3["gemini-3.1-pro-preview s2s text check"]
-    qc3["outputs/qa/stage3_5_gemini_qc.jsonl"]
+    v3["verify_tts_s2s_gemini"]
+    gm3["gemini-3.1-pro-preview s2s"]
+    qc3["stage3_5_gemini_qc.jsonl"]
+    tts_ok["with_tts.qc_passed.jsonl"]
+    drp35["drop_or_reject_3.5"]
     v3 --> gm3 --> qc3
+    v3 -->|passed| tts_ok
+    v3 -->|fail_or_parse| drp35
   end
 
   mani --> gasr
   ar_out --> v2
-  ar_out --> rtts
+  ar_ok --> rtts
   ttsout --> v3
 ```
 
-说明：`st1` 中在 Qwen 与 BGE 之间，若 `MAIN_MANUAL_ASR_REVIEW=1` 会中断流程直至人工落盘 `filled` 路径；`write_manifest` 不写入家长间隙 ASR。`st2` 中多轮请求文本与 JSON 模式定义见 [`scripts/assistant/criteria_text.py`](scripts/assistant/criteria_text.py)。更细的前端声学步骤见 `ccs_audio_pipeline` 源码与 `pipeline.py`。
+说明：  
+- **2.5 为筛**：未通过/解析失败进入 `drop_or_reject_2.5` 支路，**不**连到 TTS；`multiturn.qc_passed.jsonl` 仅通过样本。`main.sh` 在 2.5 若本批有质检行但 0 条通过则以**退出码 2** 终止。  
+- **3.5 为筛**：在 `assistant_responses_with_tts.jsonl` 上逐行质检，未通过/解析失败进入 `drop_or_reject_3.5`；`with_tts.qc_passed.jsonl` 为**双层 QC 通过**的可交付子集。若 3.5 本批 0 条通过，流水线**正常退出 0**，**stderr 打醒目警告**，请查 `outputs/qa/stage3_5_gemini_qc.jsonl`。
+
+`st1` 中在 Qwen 与 BGE 之间，若 `MAIN_MANUAL_ASR_REVIEW=1` 会中断流程直至人工落盘 `filled` 路径；`write_manifest` 不写入家长间隙 ASR。`st2` 中多轮请求文本与 JSON 模式定义见 [`scripts/assistant/criteria_text.py`](scripts/assistant/criteria_text.py)。更细的前端声学步骤见 `ccs_audio_pipeline` 源码与 `pipeline.py`。
 
 ## TTS 与设备
 
+- 单独执行 [`run_tts.sh`](run_tts.sh) / `batch_cosyvoice_tts.py` 时，**默认**输入与主流程一致（`outputs/assistant_responses_multiturn.qc_passed.jsonl`）；若你尚未跑 2.5 而需对**全量**多轮结果合成，请显式传入 `--input outputs/assistant_responses_multiturn.jsonl`。
 - 默认在可用时使用 **GPU** 跑 CosyVoice。  
 - 新显卡与 torch CUDA 轮不匹配时，可按 [`scripts/deploy_cosyvoice.py`](scripts/deploy_cosyvoice.py) 与项目内说明调整 PyTorch 索引。  
 - 强制 CPU：  

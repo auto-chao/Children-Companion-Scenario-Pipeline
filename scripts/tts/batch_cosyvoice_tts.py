@@ -270,8 +270,8 @@ def main() -> int:
     p.add_argument(
         "--input",
         type=Path,
-        default=_ROOT / "outputs" / "assistant_responses_multiturn.jsonl",
-        help="输入 JSONL",
+        default=_ROOT / "outputs" / "assistant_responses_multiturn.qc_passed.jsonl",
+        help="输入 JSONL（默认与 Stage 2.5 筛子一致；全量见 assistant_responses_multiturn.jsonl）",
     )
     p.add_argument(
         "--output",

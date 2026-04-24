@@ -54,8 +54,19 @@ if [ "${RUN2}" = "1" ]; then
   fi
   bash run_assistant_responses.sh --workers "${ASSISTANT_WORKERS:-4}"
 
-  echo "==> Stage 2.5: QC (GPT-5.4)"
-  "${PYTHON}" scripts/qa/verify_assistant_responses_gpt54.py
+  echo "==> Stage 2.5: QC (GPT-5.4) — 仅通过样本进入 TTS"
+  ec2=0
+  "${PYTHON}" scripts/qa/verify_assistant_responses_gpt54.py || ec2=$?
+  if [ "${ec2}" -ne 0 ]; then
+    if [ "${ec2}" -eq 2 ]; then
+      echo "Stage 2.5: 有质检样本但 0 条通过，终止流水线（不进入 TTS）。" >&2
+    fi
+    exit "${ec2}"
+  fi
+  if [ ! -s "outputs/assistant_responses_multiturn.qc_passed.jsonl" ]; then
+    echo "未生成或非空的 outputs/assistant_responses_multiturn.qc_passed.jsonl，无法进入 TTS。" >&2
+    exit 1
+  fi
 else
   echo "==> Skipping Stage 2 / 2.5 (assistant + GPT-5.4 质检)"
 fi
@@ -75,7 +86,7 @@ fi
 
 echo "==> Stage 3: TTS (run_tts.sh; GPU 默认，CPU 请设 COSYVOICE_FORCE_CPU=1)"
 bash run_tts.sh \
-  --input outputs/assistant_responses_multiturn.jsonl \
+  --input outputs/assistant_responses_multiturn.qc_passed.jsonl \
   --output outputs/assistant_responses_with_tts.jsonl
 
 if [ -z "${GEMINI_PROXY_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then

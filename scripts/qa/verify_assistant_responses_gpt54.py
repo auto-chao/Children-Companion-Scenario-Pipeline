@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Stage 2.5：对 assistant_responses_multiturn.jsonl 按行调用 GPT-5.4 做质量校验（复用 api_call_gpt54，不修改 api_call/）。
+Stage 2.5：对 assistant_responses_multiturn.jsonl 按行调用 GPT-5.4 做质量校验；仅 passed 的样本写入
+``assistant_responses_multiturn.qc_passed.jsonl`` 供后续 TTS。
 """
 from __future__ import annotations
 
@@ -16,13 +17,18 @@ _ROOT = next(
     (p for p in _REPO.parents if (p / "pyproject.toml").is_file()),
     _REPO.parents[3],
 )
+_QA = _REPO.parent
+if str(_QA) not in sys.path:
+    sys.path.insert(0, str(_QA))
 _API = _ROOT / "api_call"
 if str(_API) not in sys.path:
     sys.path.insert(0, str(_API))
 from api_call_gpt54 import chat_gpt54  # noqa: E402
+from qc_parse import is_qc_passed, parse_qc_json_text
 
 _DEFAULT_IN = _ROOT / "outputs" / "assistant_responses_multiturn.jsonl"
 _DEFAULT_OUT = _ROOT / "outputs" / "qa" / "stage2_5_gpt54_qc.jsonl"
+_DEFAULT_PASSED = _ROOT / "outputs" / "assistant_responses_multiturn.qc_passed.jsonl"
 
 QC_SYSTEM = """你是儿童对话数据集的数据质检员。请仔细比对【儿童当前ASR文本】与【assistant的多轮JSON输出】，判断其是否合格。
 
@@ -66,6 +72,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", type=Path, default=_DEFAULT_IN)
     ap.add_argument("--output", type=Path, default=_DEFAULT_OUT)
+    ap.add_argument(
+        "--qc-passed-out",
+        type=Path,
+        default=_DEFAULT_PASSED,
+        help="仅写入质检 passed=true 的原始行，供 TTS 使用",
+    )
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
@@ -74,12 +86,19 @@ def main() -> int:
         return 1
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.qc_passed_out.parent.mkdir(parents=True, exist_ok=True)
+
     n = 0
-    with args.input.open("r", encoding="utf-8") as fin, args.output.open("w", encoding="utf-8") as fout:
+    n_input_nonempty = 0
+    n_passed = 0
+    with args.input.open("r", encoding="utf-8") as fin, args.output.open("w", encoding="utf-8") as fout, args.qc_passed_out.open(
+        "w", encoding="utf-8"
+    ) as fpass:
         for line in fin:
             line = line.strip()
             if not line:
                 continue
+            n_input_nonempty += 1
             rec = json.loads(line)
             ml = rec.get("manifest_line")
             turns = rec.get("turns")
@@ -97,17 +116,34 @@ def main() -> int:
                 system=QC_SYSTEM,
                 user="stage2_5_qc",
             )
-            out = {
+            parsed = parse_qc_json_text(text)
+            out: dict[str, Any] = {
                 "manifest_line": ml,
                 "raw_qc": text,
                 "source_model": rec.get("model"),
+                "passed": parsed.get("passed"),
+                "summary": parsed.get("summary", ""),
+                "issues": parsed.get("issues", []),
             }
+            pe = parsed.get("parse_error")
+            if pe:
+                out["parse_error"] = pe
             fout.write(json.dumps(out, ensure_ascii=False) + "\n")
             n += 1
+            if is_qc_passed(parsed):
+                fpass.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                n_passed += 1
             if args.limit and n >= args.limit:
                 break
 
+    print(f"QC 行数={n}，通过={n_passed} -> {args.qc_passed_out}")
     print(f"Wrote {n} rows -> {args.output}")
+    if n > 0 and n_passed == 0:
+        print("本批有质检样本但 0 条通过，退出码 2（不进入 TTS）。", file=sys.stderr)
+        return 2
+    if n == 0 and n_input_nonempty > 0:
+        print("输入有内容但无有效 turns 可质检，退出码 1。", file=sys.stderr)
+        return 1
     return 0
 
 
