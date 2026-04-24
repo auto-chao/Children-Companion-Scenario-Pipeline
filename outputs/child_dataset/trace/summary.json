@@ -1,0 +1,8 @@
+{
+  "build_step": 2,
+  "child_kept_segments": 13,
+  "dialogs": 5,
+  "labels_path": "D:\\personal_code\\children_companion_scenario\\outputs\\child_dataset\\child_labels.asr.jsonl",
+  "output_dir": "D:\\personal_code\\children_companion_scenario\\outputs\\child_dataset",
+  "trace_dir": "outputs/child_dataset/trace"
+}

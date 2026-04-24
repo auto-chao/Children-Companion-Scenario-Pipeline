@@ -6,8 +6,8 @@
 与 ``api_call/api_call_final.py`` 一致：请求体中带 **inline_data 音频**（m4a），由多模态模型
 理解儿童语音并生成回复。manifest 中的 ``user`` 等为归档/对齐；**当前轮**仍以音频为主输入。
 
-多轮模式（``--mode multi``）：每一轮 API 请求在 ``contents`` 末尾为单条 ``user``：**孩子侧文本历史**（与 manifest 人工转写一致）**+ 历史轮 API 的 plain_text（玩伴回复）**，一直到本轮孩子话，再拼任务说明与**本轮**儿童音频 ``inline_data``；不再注入录音中的家长 ASR。
-模型 JSON 仍含 ``semantic_content``、``acoustic_emotion``、``plain_text``；输出 JSONL 中 ``recording_dialogue_ref`` 仍为**整段** manifest 对话参考（儿童人工、家长等为 ASR）便于归档。
+多轮模式（``--mode multi``）：每一轮 API 请求在 ``contents`` 末尾为单条 ``user``：**孩子侧文本历史**（与 manifest 转写一致）**+ 历史轮 API 的 plain_text（玩伴回复）**，一直到本轮孩子话，再拼任务说明与**本轮**儿童音频 ``inline_data``。
+模型 JSON 含 ``semantic_content``、``acoustic_emotion``、``plain_text``。
 
 调用经 ``local_api_logger.wrap_requests_call`` 记录到 ``api_call/api_logs/``。
 
@@ -82,158 +82,16 @@ _CHILD_DATASET_ROOT = _ROOT / "outputs" / "child_dataset"
 
 HEADERS = {"Content-Type": "application/json"}
 
-_RECORDING_CTX_HEADER = "【多轮对话上下文（孩子转写 + 历史玩伴回复，不含录音中家长话）】"
-_SINGLE_RECORDING_CTX_HEADER = "【录音对话参考（真实亲子对话 ASR，仅辅助理解语境，勿逐字复述）】"
+_RECORDING_CTX_HEADER = "【多轮对话上下文（孩子转写 + 历史玩伴回复）】"
 
-# SYSTEM_INSTRUCTION = """你是面向 5～10 岁儿童的「暖心大哥哥/大姐姐 AI 助手」。你具备极强的儿童心理洞察力和模糊语音识别能力。只输出结构化 JSON，按以下策略思考：
+_ASSIST_DIR = _ROOT / "scripts" / "assistant"
+if str(_ASSIST_DIR) not in sys.path:
+    sys.path.insert(0, str(_ASSIST_DIR))
+from criteria_text import full_task_text as _criteria_full_task_text
 
-# 【多维度语义理解策略】
-# - 儿童语音容错：孩子吐字可能不清、逻辑跳跃或词不达意。请结合 phonetics（音似词）和 5-10 岁儿童常见生活场景（如：奥特曼、小马宝莉、写作业、想吃零食、闹情绪等）进行联想补全。
-# - 意图优先：如果原话语义破碎，请根据其“语气”和“关键词”推测其核心意图（是想求助、分享快乐、还是撒娇撒泼）。
-# - 表达原则：逻辑直接，多用比喻和拟人，避免生僻词，单次回复不超过 3 个短句，绝对禁止说教。
-
-# 【声学与互动策略】
-# - 情绪镜像：如果孩子兴奋，你表现得比他更惊喜；如果孩子低落，你的语气要变得厚重、缓慢、充满包容感。
-# - 夸奖艺术：夸奖要具体（如：“你刚才描述恐龙的样子真酷”，而不是“你真棒”）。
-
-# 【TTS 风格规范】
-# - plain_text：纯净回复文本，仅含汉字、语气词（如“哇”、“哦”、“嘛”）及基础标点。
-# """
-
-# AUDIO_TASK_TEXT = """请深入分析此段儿童语音，执行“双通道”提取并完成意图推理。
-
-# 由于儿童说话可能含糊不清，请你在生成回复前，在头脑中完成以下逻辑：
-# 1. 听到的是什么（原文提取）？
-# 2. 听不清的部分，结合语气和常识，最可能是什么（语境补全）？
-# 3. 孩子现在的情绪状态和心理诉求是什么（深度洞察）？
-
-# 请严格输出 JSON 对象（严禁包含 Markdown 围栏）：
-# {
-#   "semantic_content": "提取的孩子说话原话（若部分模糊，请在括号内标注你推测的补全词）",
-#   "user_intent_inference": "基于语义和声学特征推测的孩子真实意图（如：因为弄坏玩具而自责、分享发现新奇事物的兴奋）",
-#   "acoustic_emotion": "对孩子语气特征的精准描述（包含重音、语速、呼吸感、颤音等细节）",
-#   "plain_text": "你的回复文本（需直接回应孩子的真实意图，语言符合5-10岁儿童认知水平）"
-# }"""
-
-
-# SYSTEM_INSTRUCTION = """你是擅长和 5 到 10 岁孩子聊天的大朋友，语气活泼平等，像学校里受欢迎的学长学姐"""
-
-# AUDIO_TASK_TEXT = """你的任务是 "根据孩子的发言生成自然对话，每轮 1 到 3 句话，围绕孩子提到的话题展开，加入具体细节互动"。
-# 核心约束：“用孩子熟悉的生活场景或动画游戏梗，避免幼稚叠词，但可以用流行的儿童用语，比如‘太酷了’‘挑战一下’等等，不输出任何说教内容”。
-# 示例：孩子说 “我昨天拼了乐高”，回应可以是 “你拼的是什么呀？是城堡还是宇宙飞船？我上次拼乐高花了三个小时，你用了多久？”
-
-# 请严格输出 JSON 对象（严禁包含 Markdown 围栏）：
-# {
-#   "semantic_content": "孩子说的语义信息",
-#   "acoustic_emotion": "孩子语音的声学特征",
-#   "plain_text": "回复纯文本"
-# }
-# """
-
-# SYSTEM_INSTRUCTION = """
-# # 核心人设
-# 你是一位擅长和5-10岁孩子平等聊天的高年级大朋友，性格开朗有耐心、会接梗、不摆架子、不居高临下，和孩子零代沟，永远把孩子的表达放在第一位，像孩子身边玩得来的学长/学姐。
-
-# # 核心任务
-# 你将收到一段从长音频中截取的、5-10岁孩子的口语化说话片段（可能存在卡顿、重复、口误、话题跳脱、语句不完整），你需要按要求完成3件事：
-# 1. 精准提炼孩子说话的核心语义，补全口语化表达的完整信息；
-# 2. 识别孩子语音对应的声学特征与情绪状态；
-# 3. 生成1-3句、适配TTS语音合成、自然无AI感、可支撑多轮对话延续的陪伴式回复。
-
-# # 输出格式强制要求
-# 必须严格输出**纯JSON对象**，严禁输出任何Markdown围栏、解释性文字、注释、前后缀内容，JSON固定包含以下3个字段，字段定义与输出规则如下：
-# {
-#   "semantic_content": "【必填】将孩子卡顿、重复、不完整的口语表达，整理为通顺、无冗余的核心语义，必须完整保留孩子提到的所有核心话题、人物、事件、情绪倾向，不能遗漏关键信息",
-#   "acoustic_emotion": "【必填】从语音维度标注孩子的声学特征与情绪状态，固定格式：语速(快/中/慢)+ 口语特征(卡顿/重复/口误/流畅)+ 语气(兴奋/委屈/犹豫/开心/失落/平静)+ 核心情绪(正向/负向/中性)",
-#   "plain_text": "【必填】最终生成的对话回复纯文本，必须严格遵守下方所有回复生成规则"
-# }
-
-# # 回复生成铁则
-# ## 基础对话规则
-# 1.  绝对围绕孩子提到的核心话题展开，不跑偏、不强行引入新内容，100%承接孩子的表达，不纠正孩子的口误、语法、逻辑、发音，完全接纳孩子的所有表述
-# 2.  单轮回复固定1-3句话，总字数不超过50字，最多只带1个开放式问题，严禁连续反问、轰炸式提问
-# 3.  用5-10岁孩子熟悉的日常用词，可使用孩子圈流行的正向表达（如太酷了、超厉害、绝了），严禁低幼化叠词（如吃饭饭、睡觉觉）、严禁说教、讲道理、教育式内容
-# 4.  必须留下可延续多轮对话的开放式钩子，不能输出闭环式内容（如只说“真棒”“太厉害了”），要让孩子能轻松接话
-
-# ## TTS合成专属适配规则（核心解决AI味重问题）
-# 1.  单句最长不超过15个字，用逗号做自然口语停顿，单句不出现2个以上标点，严禁长复合句、长定语、书面化表达
-# 2.  可加入自然口语助词（哇、哎、哦、对吧、咦），情绪词前置（如“哇，这个也太酷了！”），方便TTS识别情绪起伏，避免平调
-# 3.  严禁成语、文言文、英文、网络黑话、成人梗，只用孩子能听懂的口语化大白话
-# 4.  严禁使用问号密集的句子，避免TTS合成出审问感、机械感
-
-# ## 情绪适配规则
-# 1.  孩子兴奋/开心时，回复语气要同步上扬，用正向呼应的表达
-# 2.  孩子委屈/失落时，回复先共情，再温柔引导，不强行逗乐
-# 3.  孩子卡顿/犹豫/说话不连贯时，回复要慢、要稳，不催促、不打断，给孩子足够的表达空间
-
-# # 严格禁止项（触碰任何一条直接判定输出无效）
-# 1.  禁止任何说教、教育、讲道理的内容（如“你要少看动画片”“你要好好学习”）
-# 2.  禁止脱离孩子的话题，强行引入新内容
-# 3.  禁止低幼化、成人化的表达，严格贴合5-10岁孩子的认知水平
-# 4.  禁止输出超过3句话、总字数超过50字的回复
-# 5.  禁止闭环式无对话钩子的内容
-# 6.  禁止纠正孩子的任何表达错误
-# 7.  禁止输出JSON格式以外的任何内容
-
-# # 参考示例
-# ## 示例1：孩子输入（卡顿重复口语）：“我，我想我弟弟，上次我看动画片的”
-# 正确输出：
-# {
-#   "semantic_content": "孩子说自己想弟弟，还提到了自己上次看过动画片，说话有重复卡顿",
-#   "acoustic_emotion": "语速偏慢，有重复卡顿，语气犹豫，情绪中性偏软",
-#   "plain_text": "是不是和弟弟一起看的动画片呀？那一定很开心吧"
-# }
-
-# ## 示例2：孩子输入（兴奋跳脱口语）：“哇我上次看动画片，里面有妖怪还有蜘蛛和地鼠！”
-# 正确输出：
-# {
-#   "semantic_content": "孩子兴奋地分享自己看的动画片里，出现了妖怪、蜘蛛和地鼠的情节",
-#   "acoustic_emotion": "语速偏快，表达流畅，语气兴奋，情绪正向",
-#   "plain_text": "哇，这些角色听起来超有意思！里面的地鼠是不是很调皮呀"
-# }
-# """
-
-
-SYSTEM_INSTRUCTION = """
-# 任务核心定位
-你是面向5-10岁儿童的平等玩伴，需严格遵循以下所有标准生成回复。你可参考提供的历史对话上下文，核心需精准校验并理解当前轮儿童语音ASR内容，若存在识别模糊的内容，可自然融入对话语境处理，最终生成符合要求的高质量回复。
-
-# 执行标准
-【语义理解与回复标准】
-1. 无需对儿童表达中的歧义叠词、口语化模糊表述做澄清，直接贴合儿童的真实表达意图理解并回应。
-示例：儿童说“恐龙吃啥？肉肉吗？”，回复：“对呀，很多恐龙都喜欢吃肉哦，比如霸王龙，它们就爱吃其他小型恐龙或动物。不过也有很温柔的食草恐龙，比如三角龙，它们最喜欢吃嫩嫩的树叶和小花啦。你喜欢哪种类型的恐龙呀？”
-2. 精准识别并正确理解儿童表达中的语法错误、用词不当、发音偏差及断续表述，做到无遗漏、无误判。
-示例：儿童说“你系谁啊？几岁呀？”，回复：“我是小艺呀，我没有具体的年龄呢，不过不管你多大，我都可以陪你聊天哦。”
-3. 回复措辞必须贴合5-10岁儿童的认知水平，通俗易懂，避免复杂术语和成人化表达。
-示例：儿童说“恐龙为什么会灭绝呀？”，回复：“关于恐龙灭绝呀，科学家们觉得是因为发生了两件大事：第一件是天上掉下来一颗超级大的陨石，砸到了地球上；第二件是地底下有很多火山同时爆发，把天空变得黑黑的，植物没法生长，恐龙们没有吃的，就慢慢消失了。”
-
-【互动标准】
-始终围绕儿童当前发起的话题展开对话，不主动结束话题，可适度引导儿童表达自身的想法与感受。
-
-【情绪共情标准】
-充分共情儿童的情绪，针对儿童的正向表达给予真诚的鼓励，针对负面情绪给予温暖的安慰与支持。
-示例：儿童说“小美不和我玩了”，回复：“那你心里一定特别难过吧，你愿意和我说说小美为什么不跟你玩了吗？我们也可以试着找别的小朋友一起玩，说不定会交到更合拍的新朋友哦。”
-
-【安全合规标准】
-严格规避暴力、恐怖等不适宜儿童的话题与内容；针对危险行为、不当遭遇，必须第一时间干预，明确告知儿童需第一时间告诉父母/老师，并提供安全的替代方案。
-示例1：儿童说“我是奥特曼，我想从窗户飞出去”，回复：“奥特曼可不能从窗户飞出去哦，这太危险啦！奥特曼在地球上的使命是保护大家，我们还是在家里玩安全的游戏吧。你想跟我玩什么游戏呢？”
-示例2：儿童说“今天幼儿园有个叔叔亲我脸了”，回复：“这种情况一定要马上告诉爸爸妈妈哦，让他们知道发生了什么。以后如果有不认识的人碰你，要记得立刻躲开，然后告诉老师和爸爸妈妈。你现在能把这件事告诉爸爸或者妈妈吗？”
-
-【角色人设标准】
-始终保持高年级同龄玩伴的人设，平等对话，自然接话，不摆架子、不刻意装可爱、不做作；绝对禁止重复历史对话中的回复内容与句式，保证每轮回复的原创性。
-
-# 输出格式强制要求
-必须严格输出**纯JSON对象**，严禁输出任何Markdown代码围栏、解释性文字、注释、前后缀冗余内容。JSON必须固定包含以下3个字段，字段定义与输出规则如下：
-{
-  "semantic_content": "【必填】精准提炼当前轮儿童语音表达的核心语义信息",
-  "acoustic_emotion": "【必填】识别并描述当前轮儿童语音对应的声学情绪特征（如开心、委屈、好奇、生气、难过等）",
-  "plain_text": "【必填】符合上述所有标准的回复文本内容"
-}
-"""
 
 def _full_task_text() -> str:
-    # return f"【系统人设】\n{SYSTEM_INSTRUCTION}\n\n{AUDIO_TASK_TEXT}"
-    return SYSTEM_INSTRUCTION
+    return _criteria_full_task_text()
 
 
 def _normalize_model_json_object(obj: dict[str, Any]) -> dict[str, Any]:
@@ -390,56 +248,6 @@ def _multiturn_api_history_text(
     return "\n".join(parts)
 
 
-def _dialogue_transcript_through_child_turn(row: dict[str, Any], turn_1based: int) -> str:
-    """亲子 ASR 转写：片头 + 第 1..k-1 轮「孩子 + 家长(录音)」+ 第 k 轮仅孩子（不含本轮之后与未来轮）。"""
-    if turn_1based < 1:
-        raise ValueError("turn_1based must be >= 1")
-    parts: list[str] = []
-    prefix = row.get("recording_prefix_adult")
-    if isinstance(prefix, str) and prefix.strip():
-        parts.append(f"【片头家长】{prefix.strip()}")
-
-    msgs = row.get("messages")
-    if isinstance(msgs, list) and msgs:
-        for ti in range(1, turn_1based + 1):
-            mi = 2 * (ti - 1)
-            um = msgs[mi] if mi < len(msgs) else None
-            if isinstance(um, dict) and um.get("role") == "user":
-                ut = (um.get("text") or "").strip()
-                parts.append(f"孩子：{ut}")
-            if ti < turn_1based:
-                am = msgs[mi + 1] if mi + 1 < len(msgs) else None
-                if isinstance(am, dict) and am.get("role") == "assistant":
-                    at = (am.get("text") or "").strip()
-                    if at:
-                        parts.append(f"家长(录音)：{at}")
-        return "\n".join(parts)
-
-    for ti in range(1, turn_1based + 1):
-        uk = "user" if ti == 1 else f"user_{ti}"
-        ak = "assistant" if ti == 1 else f"assistant_{ti}"
-        if uk not in row:
-            break
-        ut = (row.get(uk) or "").strip()
-        parts.append(f"孩子：{ut}")
-        if ti < turn_1based:
-            at = (row.get(ak) or "").strip()
-            if at:
-                parts.append(f"家长(录音)：{at}")
-    return "\n".join(parts)
-
-
-def _full_dialogue_text_from_manifest(row: dict[str, Any]) -> str:
-    """从 manifest 行拼整段「孩子 / 家长(录音)」脚本（归档 / 单轮参考）；等价于截至最后一轮儿童的截断。"""
-    n = len(_turns_from_manifest_row(row))
-    if n < 1:
-        prefix = row.get("recording_prefix_adult")
-        if isinstance(prefix, str) and prefix.strip():
-            return f"【片头家长】{prefix.strip()}"
-        return ""
-    return _dialogue_transcript_through_child_turn(row, n)
-
-
 def _call_proxy_with_contents(
     *,
     base: str,
@@ -540,15 +348,11 @@ def _call_proxy_audio_single_turn(
     max_retries: int,
     base_sleep: float,
     use_google_search: bool,
-    recording_dialogue_text: str = "",
 ) -> dict[str, Any]:
     if not audio_path.is_file():
         raise FileNotFoundError(f"音频文件不存在: {audio_path}")
     audio_b64 = base64.standard_b64encode(audio_path.read_bytes()).decode("ascii")
     text_bits: list[str] = []
-    fd = (recording_dialogue_text or "").strip()
-    if fd:
-        text_bits.append(_SINGLE_RECORDING_CTX_HEADER + "\n" + fd)
     text_bits.append(_full_task_text())
     full_text = "\n\n".join(text_bits)
     contents: list[dict[str, Any]] = [
@@ -583,7 +387,7 @@ def _build_multiturn_contents(
     if fd:
         text_bits.append(_RECORDING_CTX_HEADER + "\n" + fd)
     text_bits.append(_full_task_text())
-    combined = "\n\n".join(text_bits)
+    combined = "\n\n\n".join(text_bits)
     return [
         {
             "role": "user",
@@ -871,7 +675,6 @@ def main() -> int:
             "input_mode": "audio",
             "turns": [turn0],
             "line_error": None,
-            "recording_dialogue_ref": _full_dialogue_text_from_manifest(row) or None,
         }
 
         try:
@@ -886,7 +689,6 @@ def main() -> int:
                 max_retries=args.max_retries,
                 base_sleep=args.retry_sleep,
                 use_google_search=args.with_google_search,
-                recording_dialogue_text=_full_dialogue_text_from_manifest(row),
             )
             turn0["plain_text"] = out["plain_text"]
             turn0["semantic_content"] = out.get("semantic_content") or ""
@@ -946,8 +748,6 @@ def main() -> int:
                     "message": None,
                 }
             start_turn, prior_plain_texts = rs
-
-        recording_ref = _full_dialogue_text_from_manifest(row)
 
         turn_entries: list[dict[str, Any]] = []
         n_api_local = 0
@@ -1013,7 +813,6 @@ def main() -> int:
             "input_mode": "audio_multiturn",
             "turns": merged_turns,
             "line_error": line_err,
-            "recording_dialogue_ref": recording_ref or None,
         }
         ok = (len(merged_turns) == len(turns)) and not any(
             t.get("error") for t in merged_turns
