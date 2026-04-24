@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import importlib
 import json
 import os
@@ -37,46 +36,11 @@ from ccs_audio_pipeline.asset_config import (
     format_missing_assets,
     missing_assets,
 )
-from ccs_audio_pipeline.asr_gemini_proxy import GeminiProxyAsr
 from ccs_audio_pipeline.dialogue_frontend import DialogueFrontend, summarize_audio_view
 from ccs_audio_pipeline.gpu_runtime import configure_cuda_backends, resolve_torch_device
 from ccs_audio_pipeline.turn_extraction import extract_child_query_turns
 
 DEFAULT_SAMPLE_RATE = 16000
-
-QA_SYSTEM_INSTRUCTION = (
-"你是一个亲子对话语音数据集的质检机器人。你的任务是根据对话上下文检测语音识别（ASR）错误或幻觉。儿童的语音可能语法不正确或coding switch，这是可以接受的。但由糟糕音频导致的完全胡言乱语或莫名其妙的前言不搭后语是不可接受的。返回一个包含两个字段的 JSON：'qa_pass'（布尔值）和 'reason'（字符串）。"
-)
-
-
-def parent_text_for_manifest_turn(line: dict[str, Any], turn_1based: int) -> str:
-    """上一轮家长 ASR 文本（与 manifest 键名一致，turn 为 1-based 儿童轮次）。"""
-    if turn_1based == 1:
-        return str(line.get("recording_prefix_adult") or "")
-    if turn_1based == 2:
-        return str(line.get("assistant") or "")
-    return str(line.get(f"assistant_{turn_1based - 1}") or "")
-
-
-def run_automated_qa(
-    *,
-    parent_text: str,
-    child_text: str,
-    asr_client: GeminiProxyAsr,
-) -> tuple[str, str]:
-    """单级 LLM 质检：返回 (qa_status, qa_reason)。"""
-    try:
-        obj = asr_client.generate_json_from_text(
-            system_instruction=QA_SYSTEM_INSTRUCTION,
-            user_text=f"Parent said: {parent_text}\nChild replied: {child_text}",
-        )
-        qa_pass = obj.get("qa_pass")
-        reason = str(obj.get("reason") or "")
-        if qa_pass is True:
-            return "pass", reason
-        return "reject", reason or "qa_pass is false or missing"
-    except Exception as e:
-        return "reject", f"qa_llm_error: {e}"
 
 
 @dataclass
@@ -197,7 +161,7 @@ class ChildVoiceDetector:
 
 def run_pipeline() -> None:
     parser = argparse.ArgumentParser(
-        description="Single-path reproducible SOTA pipeline for child speech dataset generation."
+        description="Child speech dataset: --step 1 exports labels + clips; --step 2 builds manifest from filled labels (no parent/gap ASR)."
     )
     parser.add_argument("--input-dir", type=Path, default=Path("data/audio"))
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/child_dataset"))
@@ -214,24 +178,6 @@ def run_pipeline() -> None:
     parser.add_argument("--multi-link-threshold", type=float, default=0.7)
     parser.add_argument("--max-turns", type=int, default=6)
     parser.add_argument(
-        "--gap-asr-min-sec",
-        type=float,
-        default=0.35,
-        help="儿童片段之间或片尾留白达到该时长才做大人语音 ASR（秒）。",
-    )
-    parser.add_argument(
-        "--gap-asr-max-sec",
-        type=float,
-        default=45.0,
-        help="相邻两轮儿童语音之间、单次大人 ASR 的最长截取（秒）。",
-    )
-    parser.add_argument(
-        "--suffix-asr-max-sec",
-        type=float,
-        default=45.0,
-        help="最后一轮儿童之后、单次大人 ASR 的最长截取（秒）。",
-    )
-    parser.add_argument(
         "--trace-dir",
         type=Path,
         default=None,
@@ -243,10 +189,18 @@ def run_pipeline() -> None:
         help="Disable CUDA throughput tweaks (no pyannote on GPU, no cuDNN autotune/TF32). For debugging.",
     )
     parser.add_argument(
-        "--qa-workers",
+        "--step",
         type=int,
-        default=4,
-        help="并行 LLM 质检（每儿童轮次）的 worker 数；设为 1 则串行。",
+        choices=(1, 2),
+        required=True,
+        help="1：儿童判定与 ffmpeg 切段，写出 child_labels.template.jsonl；"
+        "2：读已填 labels JSONL，BGE+聚链+manifest（需 --labels-path；家长槽位留空）。",
+    )
+    parser.add_argument(
+        "--labels-path",
+        type=Path,
+        default=None,
+        help="--step 2 时必填：已填写 content 的 JSONL（与 step 1 模板同 schema）。",
     )
     args = parser.parse_args()
 
@@ -258,11 +212,20 @@ def run_pipeline() -> None:
     gpu_fast = not args.no_gpu_fast
     set_deterministic(seed=args.seed, num_threads=args.num_threads, gpu_fast=gpu_fast)
 
+    if args.step == 2:
+        if not args.labels_path:
+            raise RuntimeError("--step 2 需要 --labels-path")
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        run_from_labels_phase(args, device, gpu_fast)
+        return
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     trace_paths = initialize_trace_dir(args.trace_dir) if args.trace_dir else None
-    manifest_path = args.output_dir / "manifest.jsonl"
     audios_dir = args.output_dir / "audios"
     audios_dir.mkdir(parents=True, exist_ok=True)
+    manifest_stale = args.output_dir / "manifest.jsonl"
+    if manifest_stale.exists():
+        manifest_stale.unlink()
 
     audio_files = sorted(args.input_dir.glob("*.m4a"), key=lambda p: p.name)
     if not audio_files:
@@ -288,14 +251,8 @@ def run_pipeline() -> None:
     )
     diarization_pipeline = load_pyannote_pipeline(PYANNOTE_DIR, device, gpu_fast=gpu_fast)
     child_detector = ChildVoiceDetector(CHILD_MODEL_DIR, device=device)
-    asr = GeminiProxyAsr()
-    semantic_encoder = SentenceTransformer(
-        str(SEMANTIC_MODEL_DIR),
-        device=str(device),
-        local_files_only=True,
-    )
 
-    all_segments: list[Segment] = []
+    label_template_rows: list[dict[str, Any]] = []
     audio_waveforms: dict[str, tuple[np.ndarray, int]] = {}
     for audio_path in tqdm(audio_files, desc="Processing files"):
         audio_id = audio_path.stem
@@ -434,28 +391,26 @@ def run_pipeline() -> None:
             if not passed:
                 continue
 
-            transcript = asr.transcribe(clip_wave, sr)
-            sem_embedding = semantic_encoder.encode(
-                [transcript if transcript else "[empty]"],
-                normalize_embeddings=True,
-            )[0]
-
             clip_name = f"{segment_id}.m4a"
             clip_out = audios_dir / clip_name
             cut_audio(audio_path, clip_out, start, end)
             clip_path = Path("audios") / clip_name
-            all_segments.append(
-                Segment(
-                    segment_id=segment_id,
-                    audio_id=audio_id,
-                    start=start,
-                    end=end,
-                    clip_path=clip_path,
-                    transcript=transcript.strip(),
-                    p_child=p_child,
-                    speaker_label=speaker_label,
-                    sem_embedding=np.asarray(sem_embedding, dtype=np.float32),
-                )
+
+            try:
+                rel_src = str(audio_path.resolve().relative_to(Path.cwd().resolve()))
+            except ValueError:
+                rel_src = str(audio_path)
+            label_template_rows.append(
+                {
+                    "audio_id": audio_id,
+                    "content": "",
+                    "end": end,
+                    "file_path": str(clip_path).replace("\\", "/"),
+                    "segment_id": segment_id,
+                    "source_audio": rel_src.replace("\\", "/"),
+                    "speaker_label": speaker_label,
+                    "start": start,
+                }
             )
             if trace_paths:
                 append_jsonl(
@@ -465,45 +420,32 @@ def run_pipeline() -> None:
                         "audio_clip": clip_path,
                         "candidate_source": "foreground_dialogue_view",
                         "end": end,
+                        "manual_transcript_pending": True,
                         "p_child": p_child,
                         "segment_id": segment_id,
                         "speaker_label": speaker_label,
                         "start": start,
-                        "transcript": transcript.strip(),
+                        "transcript": "",
                     },
                 )
 
-    summary["child_kept_segments"] = len(all_segments)
-    if not all_segments:
+    if args.step == 1:
+        summary["child_kept_segments"] = len(label_template_rows)
+        if not label_template_rows:
+            if trace_paths:
+                write_trace_summary(trace_paths, summary)
+            raise RuntimeError("No valid child segments after threshold filtering.")
+        tpl_path = args.output_dir / "child_labels.template.jsonl"
+        with tpl_path.open("w", encoding="utf-8") as f:
+            for row in label_template_rows:
+                f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
         if trace_paths:
             write_trace_summary(trace_paths, summary)
-        raise RuntimeError("No valid child segments after threshold filtering.")
-
-    dialogs = build_dialogs(
-        all_segments=all_segments,
-        max_gap_seconds=args.max_gap_seconds,
-        link_threshold=args.multi_link_threshold,
-        max_turns=args.max_turns,
-        trace_paths=trace_paths,
-    )
-    summary["dialogs"] = len(dialogs)
-    if trace_paths:
-        write_dialog_trace(trace_paths.dialogs_jsonl, dialogs)
-        write_trace_summary(trace_paths, summary)
-    write_manifest(
-        manifest_path,
-        dialogs,
-        audio_waveforms,
-        asr,
-        gap_min_sec=args.gap_asr_min_sec,
-        gap_max_sec=args.gap_asr_max_sec,
-        suffix_max_sec=args.suffix_asr_max_sec,
-        qa_workers=max(1, args.qa_workers),
-    )
-    print(f"Done: {manifest_path}")
-    print(f"Done: {audios_dir}")
-    if trace_paths:
-        print(f"Done: {trace_paths.root}")
+        print(f"Done: {tpl_path}")
+        print(f"Done: {audios_dir}")
+        if trace_paths:
+            print(f"Done: {trace_paths.root}")
+        return
 
 
 def load_pyannote_pipeline(model_dir: Path, device: torch.device, *, gpu_fast: bool) -> Any:
@@ -792,45 +734,12 @@ def chunk_list(items: list[Segment], size: int) -> list[list[Segment]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def _transcribe_waveform_interval(
-    waveform: np.ndarray,
-    sr: int,
-    t_start: float,
-    t_end: float,
-    asr: Any,
-    *,
-    min_sec: float,
-    max_sec: float,
-) -> str:
-    """在 [t_start, t_end] 上切片并 ASR；过短则返回空串；时长超过 max_sec 则截断。"""
-    if sr <= 0:
-        return ""
-    span = max(0.0, t_end - t_start)
-    if span < min_sec:
-        return ""
-    t1 = min(t_end, t_start + max_sec)
-    s_idx = max(0, int(t_start * sr))
-    e_idx = min(len(waveform), int(t1 * sr))
-    if e_idx <= s_idx:
-        return ""
-    clip = waveform[s_idx:e_idx]
-    if len(clip) / sr < min_sec:
-        return ""
-    return str(asr.transcribe(clip, sr)).strip()
-
-
 def write_manifest(
     path: Path,
     dialogs: list[list[Segment]],
     audio_waveforms: dict[str, tuple[np.ndarray, int]],
-    asr: GeminiProxyAsr,
-    *,
-    gap_min_sec: float,
-    gap_max_sec: float,
-    suffix_max_sec: float,
-    qa_workers: int = 4,
 ) -> None:
-    """写入 manifest；assistant 槽位为相邻两轮儿童语音之间（或片尾）的大人语音 ASR；含每轮 LLM QA。"""
+    """写入 manifest；user/儿童转写，assistant 槽位留空（不再做家长间隙 ASR）。"""
     with path.open("w", encoding="utf-8") as f:
         for dialog in dialogs:
             if not dialog:
@@ -839,22 +748,9 @@ def write_manifest(
             cached = audio_waveforms.get(audio_id)
             if cached is None:
                 raise RuntimeError(f"Missing waveform cache for audio_id={audio_id!r}")
-            waveform, sr = cached
-            dur_sec = float(len(waveform)) / float(sr) if sr else 0.0
+            _waveform, _sr = cached
 
             line: dict[str, Any] = {"messages": []}
-
-            prefix = _transcribe_waveform_interval(
-                waveform,
-                sr,
-                0.0,
-                dialog[0].start,
-                asr,
-                min_sec=gap_min_sec,
-                max_sec=gap_max_sec,
-            )
-            if prefix:
-                line["recording_prefix_adult"] = prefix
 
             for i, seg in enumerate(dialog, start=1):
                 user_key = "user" if i == 1 else f"user_{i}"
@@ -864,62 +760,124 @@ def write_manifest(
                 line[user_key] = seg.transcript
                 line[audio_key] = str(seg.clip_path).replace("\\", "/")
 
-                if i < len(dialog):
-                    nxt = dialog[i]
-                    assistant_text = _transcribe_waveform_interval(
-                        waveform,
-                        sr,
-                        seg.end,
-                        nxt.start,
-                        asr,
-                        min_sec=gap_min_sec,
-                        max_sec=gap_max_sec,
-                    )
-                else:
-                    assistant_text = _transcribe_waveform_interval(
-                        waveform,
-                        sr,
-                        seg.end,
-                        dur_sec,
-                        asr,
-                        min_sec=gap_min_sec,
-                        max_sec=suffix_max_sec,
-                    )
+                assistant_text = ""
                 line[assistant_key] = assistant_text
                 line["messages"].append({"role": "user", "text": seg.transcript})
                 line["messages"].append({"role": "assistant", "text": assistant_text})
 
-            n_turns = len(dialog)
-            turns = list(range(1, n_turns + 1))
-
-            def _qa_one(ti: int, seg: Segment) -> tuple[int, str, str]:
-                pt = parent_text_for_manifest_turn(line, ti)
-                st, rs = run_automated_qa(
-                    parent_text=pt,
-                    child_text=seg.transcript,
-                    asr_client=asr,
-                )
-                return ti, st, rs
-
-            if qa_workers <= 1:
-                child_turn_qa = []
-                for ti, seg in zip(turns, dialog, strict=True):
-                    _, st, rs = _qa_one(ti, seg)
-                    child_turn_qa.append({"qa_reason": rs, "qa_status": st, "turn": ti})
-            else:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=qa_workers) as ex:
-                    futures = [
-                        ex.submit(_qa_one, ti, seg)
-                        for ti, seg in zip(turns, dialog, strict=True)
-                    ]
-                    by_turn: dict[int, tuple[str, str]] = {}
-                    for fut in concurrent.futures.as_completed(futures):
-                        ti, st, rs = fut.result()
-                        by_turn[ti] = (st, rs)
-                child_turn_qa = [
-                    {"qa_reason": by_turn[ti][1], "qa_status": by_turn[ti][0], "turn": ti}
-                    for ti in turns
-                ]
-
-            line["child_turn_qa"] = child_turn_qa
             f.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def run_from_labels_phase(args: argparse.Namespace, device: torch.device, gpu_fast: bool) -> None:
+    """--step 2：读入已填写 content 的 JSONL，BGE + 聚链 + write_manifest（家长槽位为空）。"""
+    labels_path = args.labels_path
+    assert labels_path is not None
+    labels_path = labels_path.resolve()
+    if not labels_path.is_file():
+        raise FileNotFoundError(f"Labels file not found: {labels_path}")
+
+    rows: list[dict[str, Any]] = []
+    with labels_path.open("r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in {labels_path} line {line_no}") from e
+
+    semantic_encoder = SentenceTransformer(
+        str(SEMANTIC_MODEL_DIR),
+        device=str(device),
+        local_files_only=True,
+    )
+
+    all_segments: list[Segment] = []
+    audio_waveforms: dict[str, tuple[np.ndarray, int]] = {}
+    source_by_audio: dict[str, Path] = {}
+
+    for row in rows:
+        content = (row.get("content") or "").strip()
+        if not content:
+            warnings.warn(
+                f"跳过空 content：segment_id={row.get('segment_id')!r}",
+                stacklevel=2,
+            )
+            continue
+        audio_id = str(row["audio_id"])
+        src_raw = row.get("source_audio")
+        if not src_raw:
+            raise ValueError(f"缺少 source_audio：segment_id={row.get('segment_id')!r}")
+        src_path = Path(src_raw)
+        if not src_path.is_absolute():
+            src_path = (Path.cwd() / src_path).resolve()
+        else:
+            src_path = src_path.resolve()
+        if audio_id in source_by_audio:
+            if source_by_audio[audio_id] != src_path:
+                raise ValueError(
+                    f"同一 audio_id 对应不同 source_audio：{audio_id!r} "
+                    f"{source_by_audio[audio_id]} vs {src_path}"
+                )
+        else:
+            if not src_path.is_file():
+                raise FileNotFoundError(f"source_audio 不存在：{src_path}")
+            source_by_audio[audio_id] = src_path
+            wf, sr = load_audio_mono(src_path, args.sample_rate)
+            audio_waveforms[audio_id] = (wf, sr)
+
+        clip_path = Path(str(row["file_path"]))
+        abs_clip = (args.output_dir / clip_path).resolve()
+        if not abs_clip.is_file():
+            raise FileNotFoundError(
+                f"儿童片段不存在（请先运行 --step 1 或核对 file_path）：{abs_clip}"
+            )
+        emb = semantic_encoder.encode([content], normalize_embeddings=True)[0]
+        all_segments.append(
+            Segment(
+                segment_id=str(row["segment_id"]),
+                audio_id=audio_id,
+                start=float(row["start"]),
+                end=float(row["end"]),
+                clip_path=clip_path,
+                transcript=content,
+                p_child=float(row.get("p_child", 1.0)),
+                speaker_label=str(row.get("speaker_label") or ""),
+                sem_embedding=np.asarray(emb, dtype=np.float32),
+            )
+        )
+
+    if not all_segments:
+        raise RuntimeError("--step 2：无有效片段（content 全空或文件无有效行）")
+
+    manifest_path = args.output_dir / "manifest.jsonl"
+    trace_paths = initialize_trace_dir(args.trace_dir) if args.trace_dir else None
+
+    dialogs = build_dialogs(
+        all_segments=all_segments,
+        max_gap_seconds=args.max_gap_seconds,
+        link_threshold=args.multi_link_threshold,
+        max_turns=args.max_turns,
+        trace_paths=trace_paths,
+    )
+    summary: dict[str, Any] = {
+        "child_kept_segments": len(all_segments),
+        "build_step": 2,
+        "dialogs": len(dialogs),
+        "labels_path": str(labels_path),
+        "output_dir": str(args.output_dir.resolve()),
+        "trace_dir": trace_paths.root if trace_paths else None,
+    }
+    if trace_paths:
+        write_dialog_trace(trace_paths.dialogs_jsonl, dialogs)
+        write_trace_summary(trace_paths, summary)
+
+    write_manifest(
+        manifest_path,
+        dialogs,
+        audio_waveforms,
+    )
+    print(f"Done: {manifest_path}")
+    if trace_paths:
+        print(f"Done: {trace_paths.root}")
