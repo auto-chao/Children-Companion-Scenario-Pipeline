@@ -114,80 +114,59 @@ bash main.sh
 
 ```mermaid
 flowchart TB
-  subgraph st1 [Stage1_data_pipeline]
+  subgraph s1 [Stage1 儿童对话数据集]
     direction TB
-    in_m4a["data/audio/*.m4a"]
-    fe["DialogueFrontend ccs_audio_pipeline"]
-    dmu["Demucs htdemucs_ft"]
-    cvv["ClearVoice MossFormer2_SE_48K"]
-    pyn["pyannote speaker-diarization-community-1"]
-    cvd["ChildVoiceDetector wav2vec2-large-robust-24 age-gender"]
-    ffm["ffmpeg child clips"]
-    tpl["child_labels.template.jsonl audios/"]
-    qwn["apply_qwen_asr qwen3.5-omni-plus"]
-    asr["labels asr or filled for step2"]
-    bge["SentenceTransformer BAAI bge-m3"]
-    dlg["build_dialogs NetworkX"]
-    wmf["write_manifest"]
-    mani["manifest.jsonl"]
-    in_m4a --> fe --> dmu --> cvv --> pyn --> cvd --> ffm --> tpl
-    tpl --> qwn --> asr --> bge --> dlg --> wmf --> mani
+    s1in["原始亲子录音 · data/audio 下 m4a"]
+    s1a["人声分离 · Demucs htdemucs_ft"]
+    s1b["语音增强 · ClearVoice MossFormer2_SE_48K"]
+    s1c["说话人轮次 · pyannote speaker-diarization-community-1"]
+    s1d["儿童检测 · ChildVoiceDetector wav2vec2-large-robust-24"]
+    s1e["儿童片段切出 · ffmpeg"]
+    s1f["儿童转写 · Qwen qwen3.5-omni-plus"]
+    s1g["句向量 · BAAI bge-m3"]
+    s1h["多轮聚链与 manifest · NetworkX"]
+    s1in --> s1a --> s1b --> s1c --> s1d --> s1e --> s1f --> s1g --> s1h
   end
 
-  subgraph st2 [Stage2_multimodal_response]
-    direction TB
-    gasr["run_assistant_responses.sh"]
-    gen["generate_assistant_responses.py"]
-    gapi["Gemini compatible generateContent"]
-    gmod["gemini-3-flash-preview opt google_search"]
-    ar_out["assistant_responses_multiturn.jsonl"]
-    gasr --> gen --> gapi --> gmod
-    gmod --> ar_out
+  subgraph s2 [Stage2 多模态陪伴回复]
+    s2g["多模态生成 · Gemini 兼容 generateContent / gemini-3-flash-preview 可选 google_search"]
+    s2j["多轮全量行 · assistant_responses_multiturn.jsonl"]
+    s2g --> s2j
   end
 
-  subgraph st25 [Stage2_5_QC_gate]
-    direction TB
-    v2["verify_gpt54"]
-    gpt["gpt-5.4 criteria"]
-    qc2["stage2_5_gpt54_qc.jsonl"]
-    ar_ok["multiturn.qc_passed.jsonl"]
-    drp25["drop_or_reject_2.5"]
-    v2 --> gpt --> qc2
-    v2 -->|passed| ar_ok
-    v2 -->|fail_or_parse| drp25
+  subgraph s25 [Stage2.5 助手 JSON 规则质检]
+    s25q["符合性质检 · GPT-5.4 准则"]
+    s25p["进入 TTS 子集 · assistant_responses_multiturn.qc_passed.jsonl"]
+    s25n["不进入语音合成，见下说明"]
+    s25q -->|通过| s25p
+    s25q -->|未通过或解析失败| s25n
   end
 
-  subgraph st3 [Stage3_TTS]
-    direction TB
-    rtts["run_tts.sh batch_cosyvoice_tts.py"]
-    cosy["CosyVoice Fun-CosyVoice3-0.5B venv"]
-    ttsout["assistant_responses_with_tts.jsonl tts_wav"]
-    rtts --> cosy --> ttsout
+  subgraph s3 [Stage3 语音合成]
+    s3c["TTS · CosyVoice Fun-CosyVoice3-0.5B"]
+    s3j["含语音行 · assistant_responses_with_tts.jsonl 与 tts 音频"]
+    s3c --> s3j
   end
 
-  subgraph st35 [Stage3_5_QC_gate]
-    direction TB
-    v3["verify_tts_s2s_gemini"]
-    gm3["gemini-3.1-pro-preview s2s"]
-    qc3["stage3_5_gemini_qc.jsonl"]
-    tts_ok["with_tts.qc_passed.jsonl"]
-    drp35["drop_or_reject_3.5"]
-    v3 --> gm3 --> qc3
-    v3 -->|passed| tts_ok
-    v3 -->|fail_or_parse| drp35
+  subgraph s35 [Stage3.5 子母对话适宜性 s2s 质检]
+    s35g["适宜性 s2s · gemini-3.1-pro-preview 文本判分"]
+    s35p["可交付子集 · assistant_responses_with_tts.qc_passed.jsonl"]
+    s35d["不进入可交付，见下说明"]
+    s35g -->|通过| s35p
+    s35g -->|未通过或解析失败| s35d
   end
 
-  mani --> gasr
-  ar_out --> v2
-  ar_ok --> rtts
-  ttsout --> v3
+  s1h --> s2g
+  s2j --> s25q
+  s25p --> s3c
+  s3j --> s35g
 ```
 
 说明：  
-- **2.5 为筛**：未通过/解析失败进入 `drop_or_reject_2.5` 支路，**不**连到 TTS；`multiturn.qc_passed.jsonl` 仅通过样本。`main.sh` 在 2.5 若本批有质检行但 0 条通过则以**退出码 2** 终止。  
-- **3.5 为筛**：在 `assistant_responses_with_tts.jsonl` 上逐行质检，未通过/解析失败进入 `drop_or_reject_3.5`；`with_tts.qc_passed.jsonl` 为**双层 QC 通过**的可交付子集。若 3.5 本批 0 条通过，流水线**正常退出 0**，**stderr 打醒目警告**，请查 `outputs/qa/stage3_5_gemini_qc.jsonl`。
+- **2.5 为筛**：`passed: false` 或解析失败**不进入** Stage 3 TTS，详见证录 `outputs/qa/stage2_5_gpt54_qc.jsonl`；`assistant_responses_multiturn.qc_passed.jsonl` 仅通过样本。`main.sh` 在 2.5 若本批有质检行但 0 条通过则以**退出码 2** 终止。  
+- **3.5 为筛**：在 `assistant_responses_with_tts.jsonl` 上逐行质检，未通过/解析失败**不进入**可交付子集；`assistant_responses_with_tts.qc_passed.jsonl` 为**双层质检通过**的交付子集。若 3.5 本批 0 条通过，流水线**正常退出 0**，**stderr 打醒目警告**，请查 `outputs/qa/stage3_5_gemini_qc.jsonl`。
 
-`st1` 中在 Qwen 与 BGE 之间，若 `MAIN_MANUAL_ASR_REVIEW=1` 会中断流程直至人工落盘 `filled` 路径；`write_manifest` 不写入家长间隙 ASR。`st2` 中多轮请求文本与 JSON 模式定义见 [`scripts/assistant/criteria_text.py`](scripts/assistant/criteria_text.py)。更细的前端声学步骤见 `ccs_audio_pipeline` 源码与 `pipeline.py`。
+**Stage 1** 在 Qwen 转写与 BGE 句向量之间，若 `MAIN_MANUAL_ASR_REVIEW=1` 会中断直至人工将校对内容落盘为 `filled` 等路径；manifest 不写入家长间隙 ASR。**Stage 2** 多轮请求文本与 JSON 模式见 [`scripts/assistant/criteria_text.py`](scripts/assistant/criteria_text.py)。更细的声学前处理见 `ccs_audio_pipeline` 与 [`pipeline.py`](src/ccs_audio_pipeline/pipeline.py)。
 
 ## TTS 与设备
 
