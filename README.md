@@ -8,7 +8,7 @@
 - **Stage 2**：Gemini 兼容 **`generateContent`**，以儿童音频 + 文本历史生成结构化 JSON 回复（默认模型名由代理侧提供，见下表）。
 - **Stage 2.5**：对助手 JSONL 调 **GPT‑5.4** 做规则符合性质检；**仅** `passed: true` 的整行会写入 `assistant_responses_multiturn.qc_passed.jsonl` 并进入 TTS。解析失败或 `passed: false` 的样本不进入「含语音」阶段。
 - **Stage 3**：**CosyVoice** 对每轮 `plain_text` 做 zero-shot TTS（**输入为** 2.5 筛过后的 `.qc_passed.jsonl`）。
-- **Stage 3.5**：对「孩子 query + 玩伴回复」文本调 **Gemini** 做 s2s 适宜性质检；**仅** 通过 3.5 的 TTS 输出行写入 `assistant_responses_with_tts.qc_passed.jsonl`，作语音侧 gate 后的交付子集。
+- **Stage 3.5**：对每轮 TTS 生成的 **音频** 调 **Gemini** 多模态做听感与质量质检（结合 `plain_text` / `acoustic_emotion`）；**仅** 整行所有轮次均通过时，该行 TTS 输出才写入 `assistant_responses_with_tts.qc_passed.jsonl`，作语音侧 gate 后的交付子集。
 
 入口脚本：**[`main.sh`](main.sh)**（Git Bash / WSL / Linux / macOS）。远程 API 调用日志落在 **`api_call/api_logs/`**（由 `api_call` 内 logger 记录；流水线通过 `sys.path` 引用该目录下模块，**请勿在发行版中修改 `api_call/` 内实现**——若需换端点或密钥，请通过环境变量与代理配置处理）。
 
@@ -69,7 +69,7 @@ export ASSISTANT_WORKERS=4
 bash main.sh
 ```
 
-**执行顺序**：资产检查 → **Stage 1**（[`build_child_dataset.sh`](build_child_dataset.sh)：`--step 1` → Qwen → 可选人工断点 → `--step 2`）→ **Stage 2**（[`run_assistant_responses.sh`](run_assistant_responses.sh)）→ **Stage 2.5**（[`scripts/qa/verify_assistant_responses_gpt54.py`](scripts/qa/verify_assistant_responses_gpt54.py)）→（若 2.5 本批有质检行但 0 条通过则**退出码 2**，`main.sh` 终止、**不**跑 TTS）→ CosyVoice 虚拟环境（若缺失则 `deploy_cosyvoice.py`）→ **Stage 3**（[`run_tts.sh`](run_tts.sh)，读 `*.qc_passed.jsonl`）→ **Stage 3.5**（[`scripts/qa/verify_tts_s2s_gemini.py`](scripts/qa/verify_tts_s2s_gemini.py)；若 3.5 本批 0 条通过则流水线仍以 **退出码 0** 结束，**stderr 会打醒目警告**，请查 `outputs/qa/stage3_5_gemini_qc.jsonl`）。
+**执行顺序**：资产检查 → **Stage 1**（[`build_child_dataset.sh`](build_child_dataset.sh)：`--step 1` → Qwen → 可选人工断点 → `--step 2`）→ **Stage 2**（[`run_assistant_responses.sh`](run_assistant_responses.sh)）→ **Stage 2.5**（[`scripts/qc/verify_assistant_responses_gpt54.py`](scripts/qc/verify_assistant_responses_gpt54.py)）→（若 2.5 本批有质检行但 0 条通过则**退出码 2**，`main.sh` 终止、**不**跑 TTS）→ CosyVoice 虚拟环境（若缺失则 `deploy_cosyvoice.py`）→ **Stage 3**（[`run_tts.sh`](run_tts.sh)，读 `*.qc_passed.jsonl`）→ **Stage 3.5**（[`scripts/qc/verify_tts_s2s_gemini.py`](scripts/qc/verify_tts_s2s_gemini.py)；若 3.5 本批 0 条通过则流水线仍以 **退出码 0** 结束，**stderr 会打醒目警告**，请查 `outputs/qc/stage3_5_gemini_qc.jsonl`）。
 
 ### 人工校验 ASR（可选）
 
@@ -101,11 +101,11 @@ bash main.sh
 | `outputs/child_dataset/child_labels.filled.jsonl` | 人工校对后（若启用） |
 | `outputs/assistant_responses_multiturn.jsonl` | 助手多轮全量（Stage 2 产物） |
 | `outputs/assistant_responses_multiturn.qc_passed.jsonl` | **2.5 通过子集**（与上行 schema 相同；**Stage 3 TTS 唯一输入**） |
-| `outputs/qa/stage2_5_gpt54_qc.jsonl` | Stage 2.5 每行质检详情（`passed` / `raw_qc` / 可选 `parse_error`） |
+| `outputs/qc/stage2_5_gpt54_qc.jsonl` | Stage 2.5 每行质检详情（`passed` / `raw_qc` / 可选 `parse_error`） |
 | `outputs/tts_generated/*.wav` | 合成音频 |
 | `outputs/assistant_responses_with_tts.jsonl` | 含 `tts_audio` 的汇总（2.5 子集上合成） |
 | `outputs/assistant_responses_with_tts.qc_passed.jsonl` | **3.5 通过子集**（语音侧 gate 后可交付，与上行 schema 同） |
-| `outputs/qa/stage3_5_gemini_qc.jsonl` | Stage 3.5 每行质检详情 |
+| `outputs/qc/stage3_5_gemini_qc.jsonl` | Stage 3.5 每行质检详情（含 `turns_qc`、`line_passed`） |
 | `api_call/api_logs/` | 远程 API 请求归档 |
 
 ## 架构与数据流
@@ -163,8 +163,8 @@ flowchart TB
 ```
 
 说明：  
-- **2.5 为筛**：`passed: false` 或解析失败**不进入** Stage 3 TTS，详见证录 `outputs/qa/stage2_5_gpt54_qc.jsonl`；`assistant_responses_multiturn.qc_passed.jsonl` 仅通过样本。`main.sh` 在 2.5 若本批有质检行但 0 条通过则以**退出码 2** 终止。  
-- **3.5 为筛**：在 `assistant_responses_with_tts.jsonl` 上逐行质检，未通过/解析失败**不进入**可交付子集；`assistant_responses_with_tts.qc_passed.jsonl` 为**双层质检通过**的交付子集。若 3.5 本批 0 条通过，流水线**正常退出 0**，**stderr 打醒目警告**，请查 `outputs/qa/stage3_5_gemini_qc.jsonl`。
+- **2.5 为筛**：`passed: false` 或解析失败**不进入** Stage 3 TTS，详见证录 `outputs/qc/stage2_5_gpt54_qc.jsonl`；`assistant_responses_multiturn.qc_passed.jsonl` 仅通过样本。`main.sh` 在 2.5 若本批有质检行但 0 条通过则以**退出码 2** 终止。  
+- **3.5 为筛**：在 `assistant_responses_with_tts.jsonl` 上按**每轮 TTS 音频**多模态质检，某轮缺 `tts_audio` / 文件缺失 / `is_pass` 为 false 或解析失败则**整行**不进入可交付子集；`assistant_responses_with_tts.qc_passed.jsonl` 为**双层质检通过**的交付子集。若 3.5 本批 0 条通过，流水线**正常退出 0**，**stderr 打醒目警告**，请查 `outputs/qc/stage3_5_gemini_qc.jsonl`。
 
 **Stage 1** 在 Qwen 转写与 BGE 句向量之间，若 `MAIN_MANUAL_ASR_REVIEW=1` 会中断直至人工将校对内容落盘为 `filled` 等路径；manifest 不写入家长间隙 ASR。**Stage 2** 多轮请求文本与 JSON 模式见 [`scripts/assistant/criteria_text.py`](scripts/assistant/criteria_text.py)。更细的声学前处理见 `ccs_audio_pipeline` 与 [`pipeline.py`](src/ccs_audio_pipeline/pipeline.py)。
 

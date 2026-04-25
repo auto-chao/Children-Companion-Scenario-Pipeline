@@ -89,7 +89,7 @@ class GeminiProxyAsr:
         self._api_key = _resolve_proxy_key()
         self._base = (base_url or os.environ.get("GEMINI_PROXY_BASE") or _DEFAULT_BASE).rstrip("/")
         self._model = model_name or os.environ.get("GEMINI_ASR_MODEL") or _DEFAULT_MODEL
-        self._qa_model = os.environ.get("GEMINI_QA_MODEL") or self._model
+        self._qc_model = os.environ.get("GEMINI_QC_MODEL") or os.environ.get("GEMINI_QA_MODEL") or self._model
         self._prompt = prompt or os.environ.get("GEMINI_ASR_PROMPT") or _DEFAULT_PROMPT
         self._max_retries = max_retries
         self._base_sleep = base_sleep
@@ -163,8 +163,8 @@ class GeminiProxyAsr:
         system_instruction: str,
         user_text: str,
     ) -> dict[str, Any]:
-        """Text-only generateContent with JSON response; uses ``GEMINI_QA_MODEL`` when set, else ASR model."""
-        model = self._qa_model
+        """Text-only generateContent with JSON response; uses ``GEMINI_QC_MODEL`` (or legacy ``GEMINI_QA_MODEL``) when set, else ASR model."""
+        model = self._qc_model
         url = f"{self._base}/v1beta/models/{model}:generateContent?key={self._api_key}"
         gen_cfg = {"response_mime_type": "application/json"}
 
@@ -174,14 +174,14 @@ class GeminiProxyAsr:
                 url=url,
                 headers=HEADERS,
                 payload=payload,
-                user="pipeline_qa_text",
+                user="pipeline_qc_text",
                 verify=False,
             )
             text = _extract_text(resp_json).strip()
             if not text and "error" in resp_json:
-                raise RuntimeError(f"QA API error: {resp_json.get('error')}")
+                raise RuntimeError(f"QC API error: {resp_json.get('error')}")
             if not text:
-                raise ValueError("empty model text in QA response")
+                raise ValueError("empty model text in QC response")
             return _parse_json_loose(text)
 
         def _system_field_recoverable(msg: str) -> bool:

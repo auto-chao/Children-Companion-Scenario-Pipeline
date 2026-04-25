@@ -21,9 +21,9 @@ cd "${SCRIPT_DIR}"
 
 PYTHON="${PYTHON:-python}"
 
-RUN1=1
+RUN1=0
 RUN2=1
-RUN3=1
+RUN3=0
 [ "${MAIN_RUN_STAGE1:-1}" = "0" ] && RUN1=0
 [ "${MAIN_RUN_STAGE2:-1}" = "0" ] && RUN2=0
 [ "${MAIN_RUN_STAGE3:-1}" = "0" ] && RUN3=0
@@ -56,7 +56,7 @@ if [ "${RUN2}" = "1" ]; then
 
   echo "==> Stage 2.5: QC (GPT-5.4) — 仅通过样本进入 TTS"
   ec2=0
-  "${PYTHON}" scripts/qa/verify_assistant_responses_gpt54.py || ec2=$?
+  "${PYTHON}" scripts/qc/verify_assistant_responses_gpt54.py || ec2=$?
   if [ "${ec2}" -ne 0 ]; then
     if [ "${ec2}" -eq 2 ]; then
       echo "Stage 2.5: 有质检样本但 0 条通过，终止流水线（不进入 TTS）。" >&2
@@ -93,7 +93,7 @@ if [ -z "${GEMINI_PROXY_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
   echo "未设置 GEMINI 密钥，跳过 Stage 3.5。" >&2
 else
   echo "==> Stage 3.5: QC (gemini-3.1-pro-preview, s2s)"
-  "${PYTHON}" scripts/qa/verify_tts_s2s_gemini.py
+  "${PYTHON}" scripts/qc/verify_tts_s2s_gemini.py
 fi
 
 echo "Done."
