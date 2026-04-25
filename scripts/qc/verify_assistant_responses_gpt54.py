@@ -27,16 +27,17 @@ from api_call_gpt54 import chat_gpt54  # noqa: E402
 from qc_parse import is_qc_passed, parse_qc_json_text
 
 _DEFAULT_IN = _ROOT / "outputs" / "assistant_responses_multiturn.jsonl"
-_DEFAULT_OUT = _ROOT / "outputs" / "qa" / "stage2_5_gpt54_qc.jsonl"
+_DEFAULT_OUT = _ROOT / "outputs" / "qc" / "stage2_5_gpt54_qc.jsonl"
 _DEFAULT_PASSED = _ROOT / "outputs" / "assistant_responses_multiturn.qc_passed.jsonl"
 
-QC_SYSTEM = """你是儿童对话数据集的数据质检员。请仔细比对【儿童当前ASR文本】与【assistant的多轮JSON输出】，判断其是否合格。
+QC_SYSTEM = """你是儿童对话数据集的数据质检员。请仔细检验【儿童当前ASR文本】与【assistant的多轮JSON输出】，判断其是否合格。
 
-# 核心判定标准（触碰任意一条即为不合格 passed: false）：
-1. 幻觉与过度解读：当ASR片段混乱或语义不清时，assistant是否无中生有地编造了儿童根本没提到的具体场景、剧情或人物行为？semantic_content 是否有主观臆测（如孩子没哭写嚎啕大哭，没说原因却脑补了原因）？
-2. 违规澄清问法：plain_text 中是否出现了“你刚才说的是XX吗？”、“你的意思是XX对吗？”等反问澄清句式？
-3. 语气违和（爹妈味/幼教风）：plain_text 是否出现了长篇大论的说教、过度做作的拟人化安抚（如“玩具也需要休息”），或者使用“我会一直陪着你的”等像长辈/幼教老师的话？
-4. 句式复读机：是否频繁使用“哇！你也太厉害了吧！”、“太酷了吧！”等套路化夸张开场白？
+# 核心判定标准：
+1. 语义理解与回复标准：正确理解儿童ASR内容，给出符合5-10岁儿童认知水平的回复。
+2. 互动标准：始终围绕儿童当前发起的话题展开对话，不主动结束话题，可适度引导儿童表达自身的想法与感受。
+3. 情绪共情标准：充分共情儿童的情绪，针对儿童的正向表达给予真诚的鼓励，针对负面情绪给予温暖的安慰与支持。
+4. 安全合规标准：严格规避暴力、恐怖等不适宜儿童的话题与内容；针对危险行为、不当遭遇，必须第一时间干预，明确告知儿童需第一时间告诉父母/老师，并提供安全的替代方案。
+5. 角色人设标准：始终保持高年级同龄玩伴的人设，平等对话，自然接话，不摆架子、不刻意装可爱、不做作；绝对禁止重复历史对话中的回复内容与句式，保证每轮回复的原创性；给予正确的行为、认知、情感引导，帮助儿童建立正确的价值观和世界观。
 
 请只输出一个 JSON 对象，格式如下：
 {
