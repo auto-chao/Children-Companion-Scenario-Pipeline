@@ -35,15 +35,36 @@ def _fix_ssl_cert_env() -> None:
         os.environ.pop("SSL_CERT_FILE", None)
 
 
-# ========== 可修改：与此前 .env 中 gptplus5 配置相同，无需 .env 即可运行 ==========
-_API_KEY = "sk-ragFTLE01dU6dZPTgOKSfhPdW66jKVRY2PDfX7QQCLX4uo0F"
-_OPENAI_BASE_URL = "http://azpro.xunxkj.cn/v1"
-# ===================================================================================
+_DEFAULT_OPENAI_BASE_URL = "http://azpro.xunxkj.cn/v1"
+
+
+def _api_key() -> str:
+    key = (
+        os.environ.get("QWEN_OPENAI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("GEMINI_PROXY_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
+    )
+    if not key:
+        raise RuntimeError(
+            "请设置 QWEN_OPENAI_API_KEY / OPENAI_API_KEY，"
+            "或复用 GEMINI_PROXY_API_KEY / GEMINI_API_KEY。"
+        )
+    return key
+
+
+def _openai_base_url() -> str:
+    return (
+        os.environ.get("QWEN_OPENAI_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("GEMINI_PROXY_OPENAI_BASE")
+        or _DEFAULT_OPENAI_BASE_URL
+    )
 
 
 def build_client() -> OpenAI:
     _fix_ssl_cert_env()
-    return OpenAI(api_key=_API_KEY, base_url=_OPENAI_BASE_URL)
+    return OpenAI(api_key=_api_key(), base_url=_openai_base_url())
 
 
 def _m4a_to_wav16k_mono(m4a: Path) -> Path:

@@ -16,60 +16,138 @@
 
 | 项目 | 说明 |
 |------|------|
-| 操作系统 | Linux / macOS / Windows（示例命令以 **Git Bash** 为准） |
-| Python | 3.10+（推荐 **conda** 环境，下文以 `ccs` 为例） |
+| 操作系统 | Linux / macOS / Windows（Windows 请用 **Git Bash** 执行 `.sh` 脚本） |
+| Python | 3.10 / 3.11（不要用 3.13，CosyVoice 部分依赖可能没有 wheel） |
 | ffmpeg | 系统可执行文件在 `PATH` 中 |
-| GPU | 强烈推荐 NVIDIA GPU（数据集与 TTS）；CPU 见下文 `COSYVOICE_FORCE_CPU` |
-| 网络 | 首次 `bootstrap`、CosyVoice 部署、以及各 HTTP API 调用需要 |
+| GPU | 可无 GPU；只有 CPU 时必须设置 `COSYVOICE_FORCE_CPU=1`，速度会明显变慢 |
+| 网络 | `pip`、Hugging Face 权重、CosyVoice 代码/权重、Demucs 权重、远程 API 调用需要 |
 
-## 安装
+## 全新 CPU 机器运行步骤
+
+下面假设你从 git 仓库全新 clone，机器只有 CPU。`artifacts/`、`outputs/`、`data/audio/`、`.env` 和 API 日志都不会随 git 上传，需要在每台机器本地重新准备。
+
+### 1. 克隆仓库并准备系统依赖
 
 ```bash
-conda activate ccs
-pip install -r constraints.txt
-pip install -e .
+git clone <你的仓库地址>
+cd children_companion_scenario
 ```
 
-如需与 `constraints.txt` 一致的 CUDA 版 PyTorch，请从 [PyTorch 官网](https://pytorch.org/) 选择与本机 CUDA 匹配的 wheel，例如：
+请先确认本机已有：
+
+- `git`
+- `bash`（Windows 安装 Git for Windows 后使用 Git Bash）
+- `ffmpeg`，且 `ffmpeg -version` 可执行
+- Python 3.10 或 3.11
+
+### 2. 创建 Python 环境并安装依赖
+
+Windows Git Bash：
 
 ```bash
-pip install --upgrade "torch==2.8.0" "torchaudio==2.8.0" --index-url https://download.pytorch.org/whl/cu128
+python -m venv .venv
+source .venv/Scripts/activate
+python -m pip install -U pip wheel setuptools
+python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.8.0" "torchaudio==2.8.0"
+python -m pip install -r constraints.txt
+python -m pip install -e .
 ```
 
-使用 **pyannote** 等 Hugging Face 模型前，请在网页上接受相应模型使用条款。
-
-## 离线资产与 Hugging Face
-
-权重与清单由 [`scripts/bootstrap_assets.py`](scripts/bootstrap_assets.py) 下载到 `artifacts/models/`（具体子目录见 [`src/ccs_audio_pipeline/asset_config.py`](src/ccs_audio_pipeline/asset_config.py)）。
+Linux / macOS 只需把激活命令换成：
 
 ```bash
-conda activate ccs
+source .venv/bin/activate
+```
+
+### 3. 下载 Stage 1 离线资产
+
+先在 Hugging Face 网页接受 `pyannote/speaker-diarization-community-1` 等 gated 模型条款，然后设置 token。权重会下载到本地 `artifacts/models/`；如果 ClearerVoice 推理源码缺失，脚本会补到 `vendor/ClearerVoice-Studio/clearvoice/`。
+
+```bash
 export HF_TOKEN=你的_huggingface_token
 python scripts/bootstrap_assets.py --hf-token "$HF_TOKEN"
-```
-
-检查是否齐全：
-
-```bash
 python scripts/bootstrap_assets.py --check-only
 ```
 
-## 一键运行
+该步骤会准备：
 
-1. 将原始亲子对话 **m4a** 放入 `data/audio/`。  
-2. 设置 **`HF_TOKEN`**（若尚未 bootstrap）。  
-3. 设置 **`GEMINI_PROXY_API_KEY`** 或 **`GEMINI_API_KEY`**（Stage 2 与 Stage 3.5 需要；为同一类代理密钥）。  
-4. 儿童侧转写使用 Qwen（[`api_call/api_call_qwen.py`](api_call/api_call_qwen.py) 内模型名 `qwen3.5-omni-plus`，经 OpenAI 兼容接口，与本地 `api_logs` 一致）。
+- `pyannote/speaker-diarization-community-1`
+- `audeering/wav2vec2-large-robust-24-ft-age-gender`
+- `BAAI/bge-m3`
+- `alibabasglab/MossFormer2_SE_48K`
+- Demucs `htdemucs_ft`
+- ClearerVoice 推理源码
+
+### 4. 下载 CosyVoice 代码和 TTS 权重
+
+只有 CPU 的机器请显式使用 PyTorch CPU wheel：
 
 ```bash
-conda activate ccs
-export GEMINI_PROXY_API_KEY=你的密钥
-export HF_TOKEN=你的_huggingface_token
-export ASSISTANT_WORKERS=4
+python scripts/deploy_cosyvoice.py --torch-index-url https://download.pytorch.org/whl/cpu
+```
+
+如果 GitHub 访问不稳定，可换镜像：
+
+```bash
+export COSYVOICE_GIT_URL=<你的 CosyVoice 镜像仓库地址>
+python scripts/deploy_cosyvoice.py --torch-index-url https://download.pytorch.org/whl/cpu
+```
+
+### 5. 准备本地音频和 API 密钥
+
+```bash
+mkdir -p data/audio
+# 把原始亲子对话 .m4a 复制到 data/audio/，例如：
+# cp /d/downloads/my_audio/*.m4a data/audio/
+```
+
+远程模型调用需要你在每台机器上自己设置环境变量，不要写入代码或提交到 git。若 Qwen / GPT-5.4 / Gemini 走同一个代理网关，通常可以这样设置：
+
+```bash
+export GEMINI_PROXY_API_KEY=你的代理密钥
+export GEMINI_PROXY_BASE=http://你的网关根地址
+export OPENAI_API_KEY="$GEMINI_PROXY_API_KEY"
+export OPENAI_BASE_URL=http://你的网关根地址/v1
+```
+
+如需分别配置，也可以使用：
+
+- `QWEN_OPENAI_API_KEY` / `QWEN_OPENAI_BASE_URL`：Stage 1 Qwen ASR
+- `GPT54_OPENAI_API_KEY` / `GPT54_OPENAI_BASE_URL`：Stage 2.5 GPT-5.4 质检
+- `GEMINI_PROXY_API_KEY` / `GEMINI_PROXY_BASE`：Stage 2 生成与 Stage 3.5 TTS 质检
+
+### 6. CPU 一键运行
+
+```bash
+export COSYVOICE_FORCE_CPU=1
+export ASSISTANT_WORKERS=1
 bash main.sh
 ```
 
-**执行顺序**：资产检查 → **Stage 1**（[`build_child_dataset.sh`](build_child_dataset.sh)：`--step 1` → Qwen → 可选人工断点 → `--step 2`）→ **Stage 2**（[`run_assistant_responses.sh`](run_assistant_responses.sh)）→ **Stage 2.5**（[`scripts/qc/verify_assistant_responses_gpt54.py`](scripts/qc/verify_assistant_responses_gpt54.py)）→（若 2.5 本批有质检行但 0 条通过则**退出码 2**，`main.sh` 终止、**不**跑 TTS）→ CosyVoice 虚拟环境（若缺失则 `deploy_cosyvoice.py`）→ **Stage 3**（[`run_tts.sh`](run_tts.sh)，读 `*.qc_passed.jsonl`）→ **Stage 3.5**（[`scripts/qc/verify_tts_s2s_gemini.py`](scripts/qc/verify_tts_s2s_gemini.py)；若 3.5 本批 0 条通过则流水线仍以 **退出码 0** 结束，**stderr 会打醒目警告**，请查 `outputs/qc/stage3_5_gemini_qc.jsonl`）。
+`main.sh` 的执行顺序：资产检查 → **Stage 1**（[`build_child_dataset.sh`](build_child_dataset.sh)：`--step 1` → Qwen → 可选人工断点 → `--step 2`）→ **Stage 2**（[`run_assistant_responses.sh`](run_assistant_responses.sh)）→ **Stage 2.5**（[`scripts/qc/verify_assistant_responses_gpt54.py`](scripts/qc/verify_assistant_responses_gpt54.py)）→ CosyVoice 虚拟环境检查/部署 → **Stage 3**（[`run_tts.sh`](run_tts.sh)，读 `*.qc_passed.jsonl`）→ **Stage 3.5**（[`scripts/qc/verify_tts_s2s_gemini.py`](scripts/qc/verify_tts_s2s_gemini.py)）。
+
+如果只想先验证前面阶段，可用阶段开关：
+
+```bash
+# 只跑 Stage 1，生成 outputs/child_dataset/manifest.jsonl
+MAIN_RUN_STAGE2=0 MAIN_RUN_STAGE3=0 bash main.sh
+
+# 已有 manifest.jsonl 时，从 Stage 2 开始，不重跑音频切段
+MAIN_RUN_STAGE1=0 MAIN_RUN_STAGE3=0 bash main.sh
+
+# 已有 assistant_responses_multiturn.qc_passed.jsonl 时，只跑 TTS 与 3.5 质检
+COSYVOICE_FORCE_CPU=1 MAIN_RUN_STAGE1=0 MAIN_RUN_STAGE2=0 bash main.sh
+```
+
+## `.gitignore` 与新机器必须重建的内容
+
+以下内容是本地私有或可再生成内容，不会跟随 git 到另一台机器：
+
+- `artifacts/`：Stage 1 权重、Demucs 权重、CosyVoice 代码与 TTS 权重。
+- `outputs/`：流水线产物，可由 `main.sh` 重建。
+- `data/audio/`：你的原始亲子录音，需要在每台机器手动复制。
+- `.env`：本地密钥文件；本仓库脚本默认读取环境变量，若使用 `.env`，请先 `source .env`。
+- `api_call/api_logs/`：远程 API 请求归档日志。
 
 ### 人工校验 ASR（可选）
 

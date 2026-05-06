@@ -8,8 +8,6 @@
 #   ASSISTANT_WORKERS、PYTHON、MAIN_CHILD_LABELS_PATH、MAIN_BUILD_STEP 等
 #   COSYVOICE_FORCE_CPU=1  强制 TTS 走 CPU
 
-export GEMINI_PROXY_API_KEY="sk-ragFTLE01dU6dZPTgOKSfhPdW66jKVRY2PDfX7QQCLX4uo0F"
-
 if [ -z "${BASH_VERSION:-}" ]; then
   exec bash "$0" "$@"
 fi
@@ -21,9 +19,9 @@ cd "${SCRIPT_DIR}"
 
 PYTHON="${PYTHON:-python}"
 
-RUN1=0
+RUN1=1
 RUN2=1
-RUN3=0
+RUN3=1
 [ "${MAIN_RUN_STAGE1:-1}" = "0" ] && RUN1=0
 [ "${MAIN_RUN_STAGE2:-1}" = "0" ] && RUN2=0
 [ "${MAIN_RUN_STAGE3:-1}" = "0" ] && RUN3=0

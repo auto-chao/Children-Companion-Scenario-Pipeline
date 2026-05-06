@@ -1,11 +1,15 @@
 import base64
+import os
 from pathlib import Path
 
 from local_api_logger import wrap_requests_call
 
-API_KEY = "sk-ragFTLE01dU6dZPTgOKSfhPdW66jKVRY2PDfX7QQCLX4uo0F"
 MODEL = "gemini-3-flash-preview"
-URL = f"http://azpro.xunxkj.cn/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
+API_KEY = os.environ.get("GEMINI_PROXY_API_KEY") or os.environ.get("GEMINI_API_KEY")
+if not API_KEY:
+    raise RuntimeError("请设置 GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY。")
+BASE_URL = os.environ.get("GEMINI_PROXY_BASE", "http://azpro.xunxkj.cn").rstrip("/")
+URL = f"{BASE_URL}/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
 HEADERS = {"Content-Type": "application/json"}
 
 _ROOT = Path(__file__).resolve().parents[1]
