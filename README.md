@@ -78,6 +78,160 @@ python scripts/bootstrap_assets.py --check-only
 - Demucs `htdemucs_ft`
 - ClearerVoice 推理源码
 
+如果无法使用 `scripts/bootstrap_assets.py` 自动下载，也可以手动下载。手动放置完成后，仍然用 `python scripts/bootstrap_assets.py --check-only` 验证目录是否正确。
+
+#### Stage 1 手动下载清单
+
+`pyannote/speaker-diarization-community-1` 需要先在 Hugging Face 网页接受模型条款：
+
+```text
+https://huggingface.co/pyannote/speaker-diarization-community-1/tree/main
+```
+
+下载并保持目录结构，放到：
+
+```text
+artifacts/models/pyannote/speaker-diarization-community-1/
+```
+
+至少需要存在：
+
+```text
+artifacts/models/pyannote/speaker-diarization-community-1/config.yaml
+artifacts/models/pyannote/speaker-diarization-community-1/embedding/pytorch_model.bin
+artifacts/models/pyannote/speaker-diarization-community-1/plda/plda.npz
+artifacts/models/pyannote/speaker-diarization-community-1/plda/xvec_transform.npz
+artifacts/models/pyannote/speaker-diarization-community-1/segmentation/pytorch_model.bin
+```
+
+儿童声音分类模型：
+
+```text
+https://huggingface.co/audeering/wav2vec2-large-robust-24-ft-age-gender/tree/main
+```
+
+下载到：
+
+```text
+artifacts/models/audeering/wav2vec2-large-robust-24-ft-age-gender/
+```
+
+需要这些文件：
+
+```text
+config.json
+preprocessor_config.json
+README.md
+vocab.json
+pytorch_model.bin
+```
+
+BGE 语义向量模型：
+
+```text
+https://huggingface.co/BAAI/bge-m3/tree/main
+```
+
+下载到：
+
+```text
+artifacts/models/baai/bge-m3/
+```
+
+需要保持目录结构，下载这些文件：
+
+```text
+1_Pooling/config.json
+README.md
+colbert_linear.pt
+config.json
+config_sentence_transformers.json
+modules.json
+pytorch_model.bin
+sentence_bert_config.json
+sentencepiece.bpe.model
+sparse_linear.pt
+special_tokens_map.json
+tokenizer.json
+tokenizer_config.json
+```
+
+ClearerVoice 增强模型权重：
+
+```text
+https://huggingface.co/alibabasglab/MossFormer2_SE_48K/tree/main
+```
+
+下载到：
+
+```text
+artifacts/models/clearvoice/MossFormer2_SE_48K/
+```
+
+需要这些文件：
+
+```text
+README.md
+last_best_checkpoint
+last_best_checkpoint.pt
+```
+
+Demucs 人声分离权重下载到：
+
+```text
+artifacts/models/demucs/htdemucs_ft/
+```
+
+下载 yaml：
+
+```text
+https://raw.githubusercontent.com/adefossez/demucs/main/demucs/remote/htdemucs_ft.yaml
+```
+
+保存为：
+
+```text
+artifacts/models/demucs/htdemucs_ft/htdemucs_ft.yaml
+```
+
+下载 4 个 `.th` 权重文件：
+
+```text
+https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/f7e0c4bc-ba3fe64a.th
+https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/d12395a8-e57c48e6.th
+https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/92cfc3b6-ef3bcb9c.th
+https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/04573f0d-f3cf25b2.th
+```
+
+保存后应为：
+
+```text
+artifacts/models/demucs/htdemucs_ft/f7e0c4bc-ba3fe64a.th
+artifacts/models/demucs/htdemucs_ft/d12395a8-e57c48e6.th
+artifacts/models/demucs/htdemucs_ft/92cfc3b6-ef3bcb9c.th
+artifacts/models/demucs/htdemucs_ft/04573f0d-f3cf25b2.th
+```
+
+ClearerVoice 推理源码下载 zip：
+
+```text
+https://github.com/modelscope/ClearerVoice-Studio/archive/refs/heads/main.zip
+```
+
+解压后会得到类似 `ClearerVoice-Studio-main/` 的目录。把该目录里面的内容复制到：
+
+```text
+vendor/ClearerVoice-Studio/clearvoice/
+```
+
+注意不要把 `ClearerVoice-Studio-main/` 整个目录套进去。最终至少应存在：
+
+```text
+vendor/ClearerVoice-Studio/clearvoice/clearvoice/__init__.py
+vendor/ClearerVoice-Studio/clearvoice/clearvoice/network_wrapper.py
+vendor/ClearerVoice-Studio/clearvoice/clearvoice/config/inference/MossFormer2_SE_48K.yaml
+```
+
 ### 4. 下载 CosyVoice 代码和 TTS 权重
 
 只有 CPU 的机器请显式使用 PyTorch CPU wheel：
