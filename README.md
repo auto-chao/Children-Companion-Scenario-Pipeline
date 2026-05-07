@@ -247,6 +247,87 @@ export COSYVOICE_GIT_URL=<你的 CosyVoice 镜像仓库地址>
 python scripts/deploy_cosyvoice.py --torch-index-url https://download.pytorch.org/whl/cpu
 ```
 
+如果无法使用 `scripts/deploy_cosyvoice.py` 自动完成，也可以手动准备 CosyVoice 代码、TTS 权重和独立虚拟环境。手动准备完成后，`run_tts.sh` 会固定使用 `artifacts/cosyvoice/.venv` 里的 Python。
+
+#### CosyVoice 手动下载清单
+
+CosyVoice 代码仓库：
+
+```text
+https://github.com/FunAudioLLM/CosyVoice.git
+```
+
+推荐用递归克隆，确保 submodule 和官方参考音频也存在：
+
+```bash
+mkdir -p artifacts/cosyvoice
+git clone --depth 1 --recursive https://github.com/FunAudioLLM/CosyVoice.git artifacts/cosyvoice/CosyVoice
+```
+
+如果已经普通 clone 过，需要补 submodule：
+
+```bash
+git -C artifacts/cosyvoice/CosyVoice submodule update --init --recursive
+```
+
+最终至少应存在：
+
+```text
+artifacts/cosyvoice/CosyVoice/requirements.txt
+artifacts/cosyvoice/CosyVoice/cosyvoice/
+artifacts/cosyvoice/CosyVoice/third_party/
+artifacts/cosyvoice/CosyVoice/asset/zero_shot_prompt.wav
+```
+
+TTS 权重下载地址：
+
+```text
+https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512/tree/main
+```
+
+下载该 Hugging Face 仓库的完整文件，放到：
+
+```text
+artifacts/cosyvoice/CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B/
+```
+
+注意本地目录名必须是 `Fun-CosyVoice3-0.5B`，不是 Hugging Face 仓库名里的 `Fun-CosyVoice3-0.5B-2512`。建议完整保留 Hugging Face 仓库内所有文件，不要只下载单个权重文件。
+
+放好代码和权重后，仍需创建 CosyVoice 独立 venv 并安装依赖。可以让脚本跳过 clone 和权重下载，只做 venv / pip 安装：
+
+```bash
+python scripts/deploy_cosyvoice.py \
+  --skip-clone \
+  --skip-download \
+  --torch-index-url https://download.pytorch.org/whl/cpu
+```
+
+手动安装等价命令如下：
+
+```bash
+python -m venv artifacts/cosyvoice/.venv
+
+# Windows Git Bash
+artifacts/cosyvoice/.venv/Scripts/python.exe -m pip install -U pip wheel setuptools
+artifacts/cosyvoice/.venv/Scripts/python.exe -m pip install -r artifacts/cosyvoice/CosyVoice/requirements.txt --no-build-isolation
+artifacts/cosyvoice/.venv/Scripts/python.exe -m pip install --upgrade "torch==2.8.0" "torchaudio==2.8.0" --index-url https://download.pytorch.org/whl/cpu
+
+# Linux / macOS
+artifacts/cosyvoice/.venv/bin/python -m pip install -U pip wheel setuptools
+artifacts/cosyvoice/.venv/bin/python -m pip install -r artifacts/cosyvoice/CosyVoice/requirements.txt --no-build-isolation
+artifacts/cosyvoice/.venv/bin/python -m pip install --upgrade "torch==2.8.0" "torchaudio==2.8.0" --index-url https://download.pytorch.org/whl/cpu
+```
+
+检查方式：
+
+```bash
+# Windows Git Bash
+artifacts/cosyvoice/.venv/Scripts/python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+# Linux / macOS
+artifacts/cosyvoice/.venv/bin/python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
 ### 5. 准备本地音频和 API 密钥
 
 ```bash
