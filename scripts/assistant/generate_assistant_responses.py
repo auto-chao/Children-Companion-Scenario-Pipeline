@@ -42,9 +42,10 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 # 仓库根目录
 
@@ -624,6 +625,40 @@ def main() -> int:
     n_ok = n_skip = n_err = 0
     n_api = 0
     workers = max(1, int(args.workers))
+    write_lock = threading.Lock()
+
+    def _fsync_textio(f: TextIO) -> None:
+        try:
+            f.flush()
+            os.fsync(f.fileno())
+        except OSError:
+            try:
+                f.flush()
+            except OSError:
+                pass
+
+    def _append_output_record(rec: dict[str, Any]) -> None:
+        with write_lock:
+            with out_path.open("a", encoding="utf-8") as outf:
+                outf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                _fsync_textio(outf)
+
+    def _accumulate_and_maybe_write(r: dict[str, Any]) -> None:
+        nonlocal n_api, n_ok, n_skip, n_err
+        if r.get("message"):
+            print(str(r["message"]), file=sys.stderr)
+        n_api += int(r.get("n_api", 0))
+        st = r.get("status")
+        if st == "skip":
+            n_skip += 1
+        elif st == "ok":
+            n_ok += 1
+            if isinstance(r.get("record"), dict):
+                _append_output_record(r["record"])
+        else:
+            n_err += 1
+            if isinstance(r.get("record"), dict):
+                _append_output_record(r["record"])
 
     def _process_single_line(manifest_line: int, line: str) -> dict[str, Any]:
         try:
@@ -829,31 +864,12 @@ def main() -> int:
         inputs = [(i + 1, line) for i, line in enumerate(lines)]
         if workers > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                results = list(ex.map(lambda it: _process_single_line(it[0], it[1]), inputs))
+                futs = [ex.submit(_process_single_line, ml, ln) for ml, ln in inputs]
+                for fut in concurrent.futures.as_completed(futs):
+                    _accumulate_and_maybe_write(fut.result())
         else:
-            results = [_process_single_line(ml, ln) for ml, ln in inputs]
-
-        records_to_write: list[dict[str, Any]] = []
-        for r in results:
-            if r.get("message"):
-                print(str(r["message"]), file=sys.stderr)
-            n_api += int(r.get("n_api", 0))
-            st = r.get("status")
-            if st == "skip":
-                n_skip += 1
-            elif st == "ok":
-                n_ok += 1
-                if isinstance(r.get("record"), dict):
-                    records_to_write.append(r["record"])
-            else:
-                n_err += 1
-                if isinstance(r.get("record"), dict):
-                    records_to_write.append(r["record"])
-
-        if records_to_write:
-            with out_path.open("a", encoding="utf-8") as outf:
-                for rec in records_to_write:
-                    outf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            for ml, ln in inputs:
+                _accumulate_and_maybe_write(_process_single_line(ml, ln))
 
         print(
             f"完成：样本成功 {n_ok}，跳过 {n_skip}，样本失败/无效 {n_err}，API 调用 {n_api}，写入 {out_path}"
@@ -867,31 +883,12 @@ def main() -> int:
     inputs = [(i + 1, line) for i, line in enumerate(lines)]
     if workers > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(lambda it: _process_multi_line(it[0], it[1]), inputs))
+            futs = [ex.submit(_process_multi_line, ml, ln) for ml, ln in inputs]
+            for fut in concurrent.futures.as_completed(futs):
+                _accumulate_and_maybe_write(fut.result())
     else:
-        results = [_process_multi_line(ml, ln) for ml, ln in inputs]
-
-    records_to_write = []
-    for r in results:
-        if r.get("message"):
-            print(str(r["message"]), file=sys.stderr)
-        n_api += int(r.get("n_api", 0))
-        st = r.get("status")
-        if st == "skip":
-            n_skip += 1
-        elif st == "ok":
-            n_ok += 1
-            if isinstance(r.get("record"), dict):
-                records_to_write.append(r["record"])
-        else:
-            n_err += 1
-            if isinstance(r.get("record"), dict):
-                records_to_write.append(r["record"])
-
-    if records_to_write:
-        with out_path.open("a", encoding="utf-8") as outf:
-            for rec in records_to_write:
-                outf.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        for ml, ln in inputs:
+            _accumulate_and_maybe_write(_process_multi_line(ml, ln))
 
     print(
         f"完成：样本成功 {n_ok}，跳过 {n_skip}，样本失败/无效 {n_err}，API 调用 {n_api}，写入 {out_path}"

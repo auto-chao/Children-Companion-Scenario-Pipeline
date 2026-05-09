@@ -8,9 +8,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
+
+
+def _fsync_textio(f: TextIO) -> None:
+    try:
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError:
+        try:
+            f.flush()
+        except OSError:
+            pass
 
 _REPO = Path(__file__).resolve()
 _ROOT = next(
@@ -130,9 +142,11 @@ def main() -> int:
             if pe:
                 out["parse_error"] = pe
             fout.write(json.dumps(out, ensure_ascii=False) + "\n")
+            _fsync_textio(fout)
             n += 1
             if is_qc_passed(parsed):
                 fpass.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                _fsync_textio(fpass)
                 n_passed += 1
             if args.limit and n >= args.limit:
                 break

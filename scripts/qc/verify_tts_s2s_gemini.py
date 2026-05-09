@@ -15,7 +15,18 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
+
+
+def _fsync_textio(f: TextIO) -> None:
+    try:
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError:
+        try:
+            f.flush()
+        except OSError:
+            pass
 
 _REPO = Path(__file__).resolve()
 _ROOT = next(
@@ -328,9 +339,11 @@ def main() -> int:
                 "line_passed": line_ok,
             }
             fout.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+            _fsync_textio(fout)
             n += 1
             if line_ok and turns_qc:
                 fpass.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                _fsync_textio(fpass)
                 n_passed += 1
             if args.limit and n >= args.limit:
                 break

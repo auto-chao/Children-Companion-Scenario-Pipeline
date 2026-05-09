@@ -36,9 +36,20 @@ if "--cpu" in sys.argv or os.environ.get("COSYVOICE_FORCE_CPU", "").strip().lowe
 import time
 import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from tqdm import tqdm
+
+
+def _fsync_textio(f: TextIO) -> None:
+    try:
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError:
+        try:
+            f.flush()
+        except OSError:
+            pass
 
 
 def _repo_root() -> Path:
@@ -395,7 +406,12 @@ def main() -> int:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            ml = off + i + 1
+            fallback_ml = off + i + 1
+            try:
+                raw_ml = row.get("manifest_line")
+                ml = int(raw_ml) if raw_ml is not None else fallback_ml
+            except (TypeError, ValueError):
+                ml = fallback_ml
             processed = _process_line(
                 row,
                 manifest_line=ml,
@@ -411,6 +427,7 @@ def main() -> int:
                 resume=args.resume,
             )
             outf.write(json.dumps(processed, ensure_ascii=False) + "\n")
+            _fsync_textio(outf)
             n_ok += 1
 
     print(f"完成：写入 {out_path}（行数 {n_ok}）")

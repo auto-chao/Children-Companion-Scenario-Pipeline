@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 
 def _repo_root() -> Path:
@@ -73,13 +74,32 @@ def _read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _fsync_textio(f: TextIO) -> None:
+    try:
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError:
+        try:
+            f.flush()
+        except OSError:
+            pass
+
+
 def _write_state(path: Path, *, failed_indices: list[int], last_pass: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "failed_indices": sorted(failed_indices),
         "last_pass": last_pass,
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        _fsync_textio(f)
+
+
+def _state_failed_snapshot(failed: set[int], batch: list[int], batch_pos: int) -> list[int]:
+    """含本 pass 尚未处理的 batch 后缀，便于中断后 resume 继续跑。"""
+    not_done = set(batch[batch_pos + 1 :])
+    return sorted(failed | not_done)
 
 
 def _read_state(path: Path) -> tuple[list[int], int]:
@@ -165,6 +185,7 @@ def _write_output(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as out:
         for r in rows:
             out.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
+        _fsync_textio(out)
 
 
 def main() -> int:
@@ -277,7 +298,7 @@ def main() -> int:
             batch = sorted(pending_set)
             failed = set()
             print(f"== pass {pass_no}/{args.max_passes}（补跑 {len(batch)} 条）")
-            for i in batch:
+            for p, i in enumerate(batch):
                 row = rows_template[i]
                 clip, err = _resolve_clip(row, out_dir)
                 if err:
@@ -285,24 +306,29 @@ def main() -> int:
                     results[i] = dict(row)
                     results[i]["content"] = ""
                     failed.add(i)
-                    continue
-                text, terr = _transcribe_qwen_with_retries(
-                    clip,
-                    max_retries=args.per_item_retries,
-                    base_sleep=args.retry_sleep,
-                    user="apply_qwen_asr_to_labels",
-                    transcribe_qwen=transcribe_qwen,
-                )
-                if text is not None:
-                    results[i] = dict(row)
-                    results[i]["content"] = text
                 else:
-                    print(f"[{i}] ASR 失败（模板行 {line_nos[i]}）: {terr}", file=sys.stderr)
-                    results[i] = dict(row)
-                    results[i]["content"] = ""
-                    failed.add(i)
-            _write_output(args.output, results)
-            _write_state(state_path, failed_indices=sorted(failed), last_pass=pass_no)
+                    text, terr = _transcribe_qwen_with_retries(
+                        clip,
+                        max_retries=args.per_item_retries,
+                        base_sleep=args.retry_sleep,
+                        user="apply_qwen_asr_to_labels",
+                        transcribe_qwen=transcribe_qwen,
+                    )
+                    if text is not None:
+                        results[i] = dict(row)
+                        results[i]["content"] = text
+                        failed.discard(i)
+                    else:
+                        print(f"[{i}] ASR 失败（模板行 {line_nos[i]}）: {terr}", file=sys.stderr)
+                        results[i] = dict(row)
+                        results[i]["content"] = ""
+                        failed.add(i)
+                _write_output(args.output, results)
+                _write_state(
+                    state_path,
+                    failed_indices=_state_failed_snapshot(failed, batch, p),
+                    last_pass=pass_no,
+                )
             if not failed:
                 print(f"补跑完成，全部成功。Wrote {n} rows -> {args.output}")
                 return 0
@@ -326,7 +352,7 @@ def main() -> int:
                 break
             failed = set()
         print(f"== pass {pass_no}/{args.max_passes}（本批 {len(batch)} 条）")
-        for i in batch:
+        for p, i in enumerate(batch):
             row = rows_template[i]
             clip, err = _resolve_clip(row, out_dir)
             if err:
@@ -334,24 +360,29 @@ def main() -> int:
                 results[i] = dict(row)
                 results[i]["content"] = ""
                 failed.add(i)
-                continue
-            text, terr = _transcribe_qwen_with_retries(
-                clip,
-                max_retries=args.per_item_retries,
-                base_sleep=args.retry_sleep,
-                user="apply_qwen_asr_to_labels",
-                transcribe_qwen=transcribe_qwen,
-            )
-            if text is not None:
-                results[i] = dict(row)
-                results[i]["content"] = text
             else:
-                print(f"[{i}] ASR 失败（模板行 {line_nos[i]}）: {terr}", file=sys.stderr)
-                results[i] = dict(row)
-                results[i]["content"] = ""
-                failed.add(i)
-        _write_output(args.output, results)
-        _write_state(state_path, failed_indices=sorted(failed), last_pass=pass_no)
+                text, terr = _transcribe_qwen_with_retries(
+                    clip,
+                    max_retries=args.per_item_retries,
+                    base_sleep=args.retry_sleep,
+                    user="apply_qwen_asr_to_labels",
+                    transcribe_qwen=transcribe_qwen,
+                )
+                if text is not None:
+                    results[i] = dict(row)
+                    results[i]["content"] = text
+                    failed.discard(i)
+                else:
+                    print(f"[{i}] ASR 失败（模板行 {line_nos[i]}）: {terr}", file=sys.stderr)
+                    results[i] = dict(row)
+                    results[i]["content"] = ""
+                    failed.add(i)
+            _write_output(args.output, results)
+            _write_state(
+                state_path,
+                failed_indices=_state_failed_snapshot(failed, batch, p),
+                last_pass=pass_no,
+            )
         if not failed:
             print(f"Wrote {n} rows -> {args.output}")
             return 0

@@ -12,7 +12,7 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, TextIO
 
 import librosa
 import networkx as nx
@@ -527,9 +527,27 @@ def to_json_ready(value: Any) -> Any:
     return value
 
 
+def _fsync_textio(f: TextIO) -> None:
+    try:
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError:
+        try:
+            f.flush()
+        except OSError:
+            pass
+
+
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(to_json_ready(record), ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def append_jsonl_fsync(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(to_json_ready(record), ensure_ascii=False, sort_keys=True) + "\n")
+        _fsync_textio(f)
 
 
 def write_diarization_rttm(path: Path, diarization: Any) -> None:
@@ -545,19 +563,25 @@ def write_trace_summary(trace_paths: TracePaths, summary: dict[str, Any]) -> Non
     )
 
 
+def append_dialog_trace_record(path: Path, dialog: list[Segment], dialog_idx: int) -> None:
+    if not dialog:
+        return
+    append_jsonl_fsync(
+        path,
+        {
+            "audio_clips": [seg.clip_path for seg in dialog],
+            "audio_id": dialog[0].audio_id,
+            "dialog_id": f"dialog_{dialog_idx:04d}",
+            "num_turns": len(dialog),
+            "segment_ids": [seg.segment_id for seg in dialog],
+            "transcripts": [seg.transcript for seg in dialog],
+        },
+    )
+
+
 def write_dialog_trace(path: Path, dialogs: list[list[Segment]]) -> None:
     for idx, dialog in enumerate(dialogs):
-        append_jsonl(
-            path,
-            {
-                "audio_clips": [seg.clip_path for seg in dialog],
-                "audio_id": dialog[0].audio_id if dialog else "",
-                "dialog_id": f"dialog_{idx:04d}",
-                "num_turns": len(dialog),
-                "segment_ids": [seg.segment_id for seg in dialog],
-                "transcripts": [seg.transcript for seg in dialog],
-            },
-        )
+        append_dialog_trace_record(path, dialog, idx)
 
 
 def get_diarization_annotation(diarization: Any) -> Any:
@@ -652,18 +676,17 @@ def resolve_ffmpeg_binary() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
-def build_dialogs(
+def iter_dialog_chunks(
     all_segments: list[Segment],
     max_gap_seconds: float,
     link_threshold: float,
     max_turns: int,
     trace_paths: TracePaths | None = None,
-) -> list[list[Segment]]:
+) -> Iterator[list[Segment]]:
     by_audio: dict[str, list[Segment]] = {}
     for seg in all_segments:
         by_audio.setdefault(seg.audio_id, []).append(seg)
 
-    dialogs: list[list[Segment]] = []
     for audio_id in sorted(by_audio.keys()):
         segs = sorted(by_audio[audio_id], key=lambda x: (x.start, x.end, x.clip_path.name))
         graph = build_link_graph(
@@ -676,8 +699,25 @@ def build_dialogs(
         for nodes in components:
             chain = sorted([segs[i] for i in nodes], key=lambda x: (x.start, x.end, x.clip_path.name))
             for chunk in chunk_list(chain, max_turns):
-                dialogs.append(chunk)
-    return dialogs
+                yield chunk
+
+
+def build_dialogs(
+    all_segments: list[Segment],
+    max_gap_seconds: float,
+    link_threshold: float,
+    max_turns: int,
+    trace_paths: TracePaths | None = None,
+) -> list[list[Segment]]:
+    return list(
+        iter_dialog_chunks(
+            all_segments,
+            max_gap_seconds=max_gap_seconds,
+            link_threshold=link_threshold,
+            max_turns=max_turns,
+            trace_paths=trace_paths,
+        )
+    )
 
 
 def build_link_graph(
@@ -734,6 +774,42 @@ def chunk_list(items: list[Segment], size: int) -> list[list[Segment]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+def dialog_to_manifest_dict(
+    dialog: list[Segment],
+    audio_waveforms: dict[str, tuple[np.ndarray, int]],
+) -> dict[str, Any]:
+    """单条 manifest 样本（与 write_manifest 每行 schema 一致）。"""
+    if not dialog:
+        raise ValueError("dialog must be non-empty")
+    audio_id = dialog[0].audio_id
+    cached = audio_waveforms.get(audio_id)
+    if cached is None:
+        raise RuntimeError(f"Missing waveform cache for audio_id={audio_id!r}")
+    _waveform, _sr = cached
+
+    line: dict[str, Any] = {"messages": []}
+    for i, seg in enumerate(dialog, start=1):
+        user_key = "user" if i == 1 else f"user_{i}"
+        assistant_key = "assistant" if i == 1 else f"assistant_{i}"
+        audio_key = "audio" if i == 1 else f"audio_{i}"
+
+        line[user_key] = seg.transcript
+        line[audio_key] = str(seg.clip_path).replace("\\", "/")
+
+        assistant_text = ""
+        line[assistant_key] = assistant_text
+        line["messages"].append({"role": "user", "text": seg.transcript})
+        line["messages"].append({"role": "assistant", "text": assistant_text})
+    return line
+
+
+def append_manifest_line(path: Path, line: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")
+        _fsync_textio(f)
+
+
 def write_manifest(
     path: Path,
     dialogs: list[list[Segment]],
@@ -744,27 +820,7 @@ def write_manifest(
         for dialog in dialogs:
             if not dialog:
                 continue
-            audio_id = dialog[0].audio_id
-            cached = audio_waveforms.get(audio_id)
-            if cached is None:
-                raise RuntimeError(f"Missing waveform cache for audio_id={audio_id!r}")
-            _waveform, _sr = cached
-
-            line: dict[str, Any] = {"messages": []}
-
-            for i, seg in enumerate(dialog, start=1):
-                user_key = "user" if i == 1 else f"user_{i}"
-                assistant_key = "assistant" if i == 1 else f"assistant_{i}"
-                audio_key = "audio" if i == 1 else f"audio_{i}"
-
-                line[user_key] = seg.transcript
-                line[audio_key] = str(seg.clip_path).replace("\\", "/")
-
-                assistant_text = ""
-                line[assistant_key] = assistant_text
-                line["messages"].append({"role": "user", "text": seg.transcript})
-                line["messages"].append({"role": "assistant", "text": assistant_text})
-
+            line = dialog_to_manifest_dict(dialog, audio_waveforms)
             f.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")
 
 
@@ -852,32 +908,33 @@ def run_from_labels_phase(args: argparse.Namespace, device: torch.device, gpu_fa
         raise RuntimeError("--step 2：无有效片段（content 全空或文件无有效行）")
 
     manifest_path = args.output_dir / "manifest.jsonl"
+    manifest_path.unlink(missing_ok=True)
+
     trace_paths = initialize_trace_dir(args.trace_dir) if args.trace_dir else None
 
-    dialogs = build_dialogs(
+    dialog_count = 0
+    for chunk in iter_dialog_chunks(
         all_segments=all_segments,
         max_gap_seconds=args.max_gap_seconds,
         link_threshold=args.multi_link_threshold,
         max_turns=args.max_turns,
         trace_paths=trace_paths,
-    )
+    ):
+        append_manifest_line(manifest_path, dialog_to_manifest_dict(chunk, audio_waveforms))
+        if trace_paths:
+            append_dialog_trace_record(trace_paths.dialogs_jsonl, chunk, dialog_count)
+        dialog_count += 1
+
     summary: dict[str, Any] = {
         "child_kept_segments": len(all_segments),
         "build_step": 2,
-        "dialogs": len(dialogs),
+        "dialogs": dialog_count,
         "labels_path": str(labels_path),
         "output_dir": str(args.output_dir.resolve()),
         "trace_dir": trace_paths.root if trace_paths else None,
     }
     if trace_paths:
-        write_dialog_trace(trace_paths.dialogs_jsonl, dialogs)
         write_trace_summary(trace_paths, summary)
-
-    write_manifest(
-        manifest_path,
-        dialogs,
-        audio_waveforms,
-    )
     print(f"Done: {manifest_path}")
     if trace_paths:
         print(f"Done: {trace_paths.root}")
