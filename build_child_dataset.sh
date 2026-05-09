@@ -73,22 +73,22 @@ if ! "${PYTHON}" scripts/bootstrap_assets.py --check-only >/dev/null 2>&1; then
 fi
 
 if [ "${STEP}" = "1" ]; then
-  "${PYTHON}" scripts/build_dataset.py \
-    --input-dir data/audio \
-    --output-dir "${OUTPUT_DIR}" \
-    --step 1 \
-    --seed 42 \
-    --num-threads 8 \
-    --max-turn-sec 30.0 \
-    --min-turn-sec 1.25 \
-    --turn-merge-gap-sec 0.5 \
-    --turn-glitch-max-sec 0.25 \
-    --turn-glitch-gap-sec 0.2 \
-    --child-threshold 0.6 \
-    --max-gap-seconds 30 \
-    --multi-link-threshold 0.7 \
-    --max-turns 6 \
-    --trace-dir "${TRACE_DIR}"
+  # "${PYTHON}" scripts/build_dataset.py \
+  #   --input-dir data/audio \
+  #   --output-dir "${OUTPUT_DIR}" \
+  #   --step 1 \
+  #   --seed 42 \
+  #   --num-threads 8 \
+  #   --max-turn-sec 30.0 \
+  #   --min-turn-sec 1.25 \
+  #   --turn-merge-gap-sec 0.5 \
+  #   --turn-glitch-max-sec 0.25 \
+  #   --turn-glitch-gap-sec 0.2 \
+  #   --child-threshold 0.6 \
+  #   --max-gap-seconds 30 \
+  #   --multi-link-threshold 0.7 \
+  #   --max-turns 6 \
+  #   --trace-dir "${TRACE_DIR}"
   if [ ! -f "${TEMPLATE_PATH}" ]; then
     echo "未生成 ${TEMPLATE_PATH}" >&2
     exit 1
