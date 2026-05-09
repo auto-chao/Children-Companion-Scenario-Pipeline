@@ -47,6 +47,8 @@ import time
 from pathlib import Path
 from typing import Any, TextIO
 
+from tqdm import tqdm
+
 # 仓库根目录
 
 
@@ -570,6 +572,11 @@ def main() -> int:
         default=4,
         help="并发 worker 数（默认 4）。按 manifest 行并发；多轮同一行内仍串行保证上下文。",
     )
+    p.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="不显示 tqdm 进度条（便于重定向日志）",
+    )
     args = p.parse_args()
 
     if args.mode == "single" and args.input is None:
@@ -865,10 +872,21 @@ def main() -> int:
         if workers > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                 futs = [ex.submit(_process_single_line, ml, ln) for ml, ln in inputs]
-                for fut in concurrent.futures.as_completed(futs):
+                for fut in tqdm(
+                    concurrent.futures.as_completed(futs),
+                    total=len(futs),
+                    desc="assistant single",
+                    unit="manifest",
+                    disable=args.no_progress,
+                ):
                     _accumulate_and_maybe_write(fut.result())
         else:
-            for ml, ln in inputs:
+            for ml, ln in tqdm(
+                inputs,
+                desc="assistant single",
+                unit="manifest",
+                disable=args.no_progress,
+            ):
                 _accumulate_and_maybe_write(_process_single_line(ml, ln))
 
         print(
@@ -884,10 +902,21 @@ def main() -> int:
     if workers > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             futs = [ex.submit(_process_multi_line, ml, ln) for ml, ln in inputs]
-            for fut in concurrent.futures.as_completed(futs):
+            for fut in tqdm(
+                concurrent.futures.as_completed(futs),
+                total=len(futs),
+                desc="assistant multi",
+                unit="manifest",
+                disable=args.no_progress,
+            ):
                 _accumulate_and_maybe_write(fut.result())
     else:
-        for ml, ln in inputs:
+        for ml, ln in tqdm(
+            inputs,
+            desc="assistant multi",
+            unit="manifest",
+            disable=args.no_progress,
+        ):
             _accumulate_and_maybe_write(_process_multi_line(ml, ln))
 
     print(

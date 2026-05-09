@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any, TextIO
 
+from tqdm import tqdm
+
 
 def _repo_root() -> Path:
     p = Path(__file__).resolve()
@@ -242,6 +244,11 @@ def main() -> int:
         help="单条首次重试前等待秒数（默认 1.0）",
     )
     p.add_argument("--limit", type=int, default=0, help="仅处理前 N 行，0=全部")
+    p.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="不显示 tqdm 进度条（便于重定向日志）",
+    )
     args = p.parse_args()
 
     if args.max_passes < 1:
@@ -298,7 +305,12 @@ def main() -> int:
             batch = sorted(pending_set)
             failed = set()
             print(f"== pass {pass_no}/{args.max_passes}（补跑 {len(batch)} 条）")
-            for p, i in enumerate(batch):
+            bar_kw: dict[str, Any] = {
+                "disable": args.no_progress,
+                "unit": "seg",
+                "desc": f"Qwen ASR resume {pass_no}/{args.max_passes}",
+            }
+            for p, i in enumerate(tqdm(batch, **bar_kw)):
                 row = rows_template[i]
                 clip, err = _resolve_clip(row, out_dir)
                 if err:
@@ -352,7 +364,12 @@ def main() -> int:
                 break
             failed = set()
         print(f"== pass {pass_no}/{args.max_passes}（本批 {len(batch)} 条）")
-        for p, i in enumerate(batch):
+        bar_kw = {
+            "disable": args.no_progress,
+            "unit": "seg",
+            "desc": f"Qwen ASR {pass_no}/{args.max_passes}",
+        }
+        for p, i in enumerate(tqdm(batch, **bar_kw)):
             row = rows_template[i]
             clip, err = _resolve_clip(row, out_dir)
             if err:

@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any, TextIO
 
+from tqdm import tqdm
+
 
 def _fsync_textio(f: TextIO) -> None:
     try:
@@ -107,7 +109,7 @@ def main() -> int:
     with args.input.open("r", encoding="utf-8") as fin, args.output.open("w", encoding="utf-8") as fout, args.qc_passed_out.open(
         "w", encoding="utf-8"
     ) as fpass:
-        for line in fin:
+        for line in tqdm(fin, desc="stage2.5 QC", unit="line"):
             line = line.strip()
             if not line:
                 continue

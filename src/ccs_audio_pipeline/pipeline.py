@@ -853,7 +853,7 @@ def run_from_labels_phase(args: argparse.Namespace, device: torch.device, gpu_fa
     audio_waveforms: dict[str, tuple[np.ndarray, int]] = {}
     source_by_audio: dict[str, Path] = {}
 
-    for row in rows:
+    for row in tqdm(rows, desc="step2 labels (BGE)", unit="row"):
         content = (row.get("content") or "").strip()
         if not content:
             warnings.warn(
@@ -913,12 +913,16 @@ def run_from_labels_phase(args: argparse.Namespace, device: torch.device, gpu_fa
     trace_paths = initialize_trace_dir(args.trace_dir) if args.trace_dir else None
 
     dialog_count = 0
-    for chunk in iter_dialog_chunks(
-        all_segments=all_segments,
-        max_gap_seconds=args.max_gap_seconds,
-        link_threshold=args.multi_link_threshold,
-        max_turns=args.max_turns,
-        trace_paths=trace_paths,
+    for chunk in tqdm(
+        iter_dialog_chunks(
+            all_segments=all_segments,
+            max_gap_seconds=args.max_gap_seconds,
+            link_threshold=args.multi_link_threshold,
+            max_turns=args.max_turns,
+            trace_paths=trace_paths,
+        ),
+        desc="step2 manifest",
+        unit="dlg",
     ):
         append_manifest_line(manifest_path, dialog_to_manifest_dict(chunk, audio_waveforms))
         if trace_paths:
