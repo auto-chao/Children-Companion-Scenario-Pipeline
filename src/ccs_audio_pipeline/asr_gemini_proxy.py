@@ -8,7 +8,6 @@ import os
 import re
 import sys
 import tempfile
-import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +26,7 @@ import local_api_logger.tracker as _tr
 
 _tr._default_tracker.logger = _lm._default_logger
 from local_api_logger import wrap_requests_call  # noqa: E402
+from retry_policy import is_retryable_error_message, sleep_before_next_attempt  # noqa: E402
 
 HEADERS = {"Content-Type": "application/json"}
 _DEFAULT_BASE = "http://azpro.xunxkj.cn"
@@ -139,19 +139,8 @@ class GeminiProxyAsr:
                 return text
             except Exception as e:
                 last_err = e
-                msg = str(e).lower()
-                retryable = (
-                    "429" in msg
-                    or "resource exhausted" in msg
-                    or "quota" in msg
-                    or "rate" in msg
-                    or "503" in msg
-                    or "timeout" in msg
-                    or "502" in msg
-                )
-                if attempt < self._max_retries - 1 and retryable:
-                    time.sleep(sleep_s)
-                    sleep_s = min(sleep_s * 2, 60.0)
+                if attempt < self._max_retries - 1 and is_retryable_error_message(str(e)):
+                    sleep_s = sleep_before_next_attempt(sleep_s)
                     continue
                 break
         assert last_err is not None
@@ -218,19 +207,8 @@ class GeminiProxyAsr:
                         return _call(payload_fb)
                     except Exception as e_fb:
                         last_err = e_fb
-                msg = str(last_err).lower()
-                retryable = (
-                    "429" in msg
-                    or "resource exhausted" in msg
-                    or "quota" in msg
-                    or "rate" in msg
-                    or "503" in msg
-                    or "timeout" in msg
-                    or "502" in msg
-                )
-                if attempt < self._max_retries - 1 and retryable:
-                    time.sleep(sleep_s)
-                    sleep_s = min(sleep_s * 2, 60.0)
+                if attempt < self._max_retries - 1 and is_retryable_error_message(str(last_err)):
+                    sleep_s = sleep_before_next_attempt(sleep_s)
                     continue
                 break
         assert last_err is not None

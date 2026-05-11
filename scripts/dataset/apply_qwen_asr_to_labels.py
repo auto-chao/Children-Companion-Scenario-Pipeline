@@ -13,10 +13,11 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import sys
-import time
+import threading
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -32,6 +33,12 @@ def _repo_root() -> Path:
 
 
 _ROOT = _repo_root()
+_API_CALL = str(_ROOT / "api_call")
+if _API_CALL not in sys.path:
+    sys.path.insert(0, _API_CALL)
+from retry_policy import is_retryable_error_message, sleep_before_next_attempt  # noqa: E402
+from api_call_qwen import transcribe_qwen  # noqa: E402
+
 _DEFAULT_TEMPLATE = _ROOT / "outputs" / "child_dataset" / "child_labels.template.jsonl"
 _DEFAULT_OUT = _ROOT / "outputs" / "child_dataset" / "child_labels.asr.jsonl"
 
@@ -98,10 +105,9 @@ def _write_state(path: Path, *, failed_indices: list[int], last_pass: int) -> No
         _fsync_textio(f)
 
 
-def _state_failed_snapshot(failed: set[int], batch: list[int], batch_pos: int) -> list[int]:
-    """含本 pass 尚未处理的 batch 后缀，便于中断后 resume 继续跑。"""
-    not_done = set(batch[batch_pos + 1 :])
-    return sorted(failed | not_done)
+def _state_failed_snapshot(failed: set[int], batch: list[int], finished: set[int]) -> list[int]:
+    """含本 pass 尚未完成的 batch 索引，便于中断后 resume 继续跑。"""
+    return sorted(failed | (set(batch) - finished))
 
 
 def _read_state(path: Path) -> tuple[list[int], int]:
@@ -157,26 +163,8 @@ def _transcribe_qwen_with_retries(
             return (text or "").strip(), None
         except Exception as e:
             last_msg = f"{type(e).__name__}: {e}"
-            msg = str(e).lower()
-            retryable = (
-                "timeout" in msg
-                or "timed out" in msg
-                or "connection" in msg
-                or "connect" in msg
-                or "network" in msg
-                or "429" in msg
-                or "503" in msg
-                or "502" in msg
-                or "500" in msg
-                or "rate" in msg
-                or "quota" in msg
-                or "broken pipe" in msg
-                or "reset" in msg
-                or "stream" in msg
-            )
-            if attempt < max_retries - 1 and retryable:
-                time.sleep(sleep_s)
-                sleep_s = min(sleep_s * 2, 60.0)
+            if attempt < max_retries - 1 and is_retryable_error_message(str(e)):
+                sleep_s = sleep_before_next_attempt(sleep_s)
                 continue
             break
     return None, last_msg
@@ -188,6 +176,101 @@ def _write_output(path: Path, rows: list[dict[str, Any]]) -> None:
         for r in rows:
             out.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
         _fsync_textio(out)
+
+
+def _process_asr_index(
+    i: int,
+    row: dict[str, Any],
+    out_dir: Path,
+    line_no: int,
+    *,
+    per_item_retries: int,
+    retry_sleep: float,
+) -> tuple[int, dict[str, Any], bool]:
+    """返回 (索引, 新行, 是否失败)。失败含文件缺失与 ASR 耗尽重试。"""
+    clip, err = _resolve_clip(row, out_dir)
+    if err:
+        print(f"[{i}] 跳过 ASR: {err}（模板行 {line_no}）", file=sys.stderr)
+        new_row = dict(row)
+        new_row["content"] = ""
+        return i, new_row, True
+    text, terr = _transcribe_qwen_with_retries(
+        clip,
+        max_retries=per_item_retries,
+        base_sleep=retry_sleep,
+        user="apply_qwen_asr_to_labels",
+        transcribe_qwen=transcribe_qwen,
+    )
+    if text is not None:
+        new_row = dict(row)
+        new_row["content"] = text
+        return i, new_row, False
+    print(f"[{i}] ASR 失败（模板行 {line_no}）: {terr}", file=sys.stderr)
+    new_row = dict(row)
+    new_row["content"] = ""
+    return i, new_row, True
+
+
+def _run_asr_batch(
+    batch: list[int],
+    *,
+    rows_template: list[dict[str, Any]],
+    line_nos: list[int],
+    out_dir: Path,
+    results: list[dict[str, Any]],
+    failed: set[int],
+    pass_no: int,
+    state_path: Path,
+    output_path: Path,
+    workers: int,
+    no_progress: bool,
+    desc: str,
+    per_item_retries: int,
+    retry_sleep: float,
+) -> None:
+    finished: set[int] = set()
+    lock = threading.Lock()
+    n_workers = max(1, int(workers))
+
+    def _one(idx: int) -> tuple[int, dict[str, Any], bool]:
+        return _process_asr_index(
+            idx,
+            rows_template[idx],
+            out_dir,
+            line_nos[idx],
+            per_item_retries=per_item_retries,
+            retry_sleep=retry_sleep,
+        )
+
+    def _commit(triple: tuple[int, dict[str, Any], bool]) -> None:
+        i, new_row, is_fail = triple
+        with lock:
+            results[i] = new_row
+            if is_fail:
+                failed.add(i)
+            else:
+                failed.discard(i)
+            finished.add(i)
+            _write_output(output_path, results)
+            _write_state(
+                state_path,
+                failed_indices=_state_failed_snapshot(failed, batch, finished),
+                last_pass=pass_no,
+            )
+
+    bar_kw: dict[str, Any] = {"disable": no_progress, "unit": "seg", "desc": desc}
+    if n_workers > 1 and len(batch) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+            futs = [ex.submit(_one, i) for i in batch]
+            for fut in tqdm(
+                concurrent.futures.as_completed(futs),
+                total=len(futs),
+                **bar_kw,
+            ):
+                _commit(fut.result())
+    else:
+        for i in tqdm(batch, **bar_kw):
+            _commit(_one(i))
 
 
 def main() -> int:
@@ -249,6 +332,12 @@ def main() -> int:
         action="store_true",
         help="不显示 tqdm 进度条（便于重定向日志）",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并行 ASR 线程数（默认 1；各行独立，无跨行顺序依赖）",
+    )
     args = p.parse_args()
 
     if args.max_passes < 1:
@@ -270,11 +359,6 @@ def main() -> int:
     if n == 0:
         print("模板无有效数据行", file=sys.stderr)
         return 1
-
-    _api = str(_ROOT / "api_call")
-    if _api not in sys.path:
-        sys.path.insert(0, _api)
-    from api_call_qwen import transcribe_qwen
 
     # 结果槽位：与模板顺序一一对应
     results: list[dict[str, Any]] = [dict(r) for r in rows_template]
@@ -305,42 +389,22 @@ def main() -> int:
             batch = sorted(pending_set)
             failed = set()
             print(f"== pass {pass_no}/{args.max_passes}（补跑 {len(batch)} 条）")
-            bar_kw: dict[str, Any] = {
-                "disable": args.no_progress,
-                "unit": "seg",
-                "desc": f"Qwen ASR resume {pass_no}/{args.max_passes}",
-            }
-            for p, i in enumerate(tqdm(batch, **bar_kw)):
-                row = rows_template[i]
-                clip, err = _resolve_clip(row, out_dir)
-                if err:
-                    print(f"[{i}] 跳过 ASR: {err}（模板行 {line_nos[i]}）", file=sys.stderr)
-                    results[i] = dict(row)
-                    results[i]["content"] = ""
-                    failed.add(i)
-                else:
-                    text, terr = _transcribe_qwen_with_retries(
-                        clip,
-                        max_retries=args.per_item_retries,
-                        base_sleep=args.retry_sleep,
-                        user="apply_qwen_asr_to_labels",
-                        transcribe_qwen=transcribe_qwen,
-                    )
-                    if text is not None:
-                        results[i] = dict(row)
-                        results[i]["content"] = text
-                        failed.discard(i)
-                    else:
-                        print(f"[{i}] ASR 失败（模板行 {line_nos[i]}）: {terr}", file=sys.stderr)
-                        results[i] = dict(row)
-                        results[i]["content"] = ""
-                        failed.add(i)
-                _write_output(args.output, results)
-                _write_state(
-                    state_path,
-                    failed_indices=_state_failed_snapshot(failed, batch, p),
-                    last_pass=pass_no,
-                )
+            _run_asr_batch(
+                batch,
+                rows_template=rows_template,
+                line_nos=line_nos,
+                out_dir=out_dir,
+                results=results,
+                failed=failed,
+                pass_no=pass_no,
+                state_path=state_path,
+                output_path=args.output,
+                workers=args.workers,
+                no_progress=args.no_progress,
+                desc=f"Qwen ASR resume {pass_no}/{args.max_passes}",
+                per_item_retries=args.per_item_retries,
+                retry_sleep=args.retry_sleep,
+            )
             if not failed:
                 print(f"补跑完成，全部成功。Wrote {n} rows -> {args.output}")
                 return 0
@@ -364,42 +428,22 @@ def main() -> int:
                 break
             failed = set()
         print(f"== pass {pass_no}/{args.max_passes}（本批 {len(batch)} 条）")
-        bar_kw = {
-            "disable": args.no_progress,
-            "unit": "seg",
-            "desc": f"Qwen ASR {pass_no}/{args.max_passes}",
-        }
-        for p, i in enumerate(tqdm(batch, **bar_kw)):
-            row = rows_template[i]
-            clip, err = _resolve_clip(row, out_dir)
-            if err:
-                print(f"[{i}] 跳过 ASR: {err}（模板行 {line_nos[i]}）", file=sys.stderr)
-                results[i] = dict(row)
-                results[i]["content"] = ""
-                failed.add(i)
-            else:
-                text, terr = _transcribe_qwen_with_retries(
-                    clip,
-                    max_retries=args.per_item_retries,
-                    base_sleep=args.retry_sleep,
-                    user="apply_qwen_asr_to_labels",
-                    transcribe_qwen=transcribe_qwen,
-                )
-                if text is not None:
-                    results[i] = dict(row)
-                    results[i]["content"] = text
-                    failed.discard(i)
-                else:
-                    print(f"[{i}] ASR 失败（模板行 {line_nos[i]}）: {terr}", file=sys.stderr)
-                    results[i] = dict(row)
-                    results[i]["content"] = ""
-                    failed.add(i)
-            _write_output(args.output, results)
-            _write_state(
-                state_path,
-                failed_indices=_state_failed_snapshot(failed, batch, p),
-                last_pass=pass_no,
-            )
+        _run_asr_batch(
+            batch,
+            rows_template=rows_template,
+            line_nos=line_nos,
+            out_dir=out_dir,
+            results=results,
+            failed=failed,
+            pass_no=pass_no,
+            state_path=state_path,
+            output_path=args.output,
+            workers=args.workers,
+            no_progress=args.no_progress,
+            desc=f"Qwen ASR {pass_no}/{args.max_passes}",
+            per_item_retries=args.per_item_retries,
+            retry_sleep=args.retry_sleep,
+        )
         if not failed:
             print(f"Wrote {n} rows -> {args.output}")
             return 0

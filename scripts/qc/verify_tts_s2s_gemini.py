@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import json
 import os
 import re
@@ -50,6 +51,7 @@ import local_api_logger.tracker as _tr  # noqa: E402
 _tr._default_tracker.logger = _lm._default_logger
 from local_api_logger import wrap_requests_call  # noqa: E402
 from qc_parse import is_tts_s2s_qc_passed, parse_tts_s2s_qc_json_text  # noqa: E402
+from retry_policy import is_retryable_error_message, sleep_before_next_attempt  # noqa: E402
 
 _DEFAULT_IN = _ROOT / "outputs" / "assistant_responses_with_tts.jsonl"
 _DEFAULT_OUT = _ROOT / "outputs" / "qc" / "stage3_5_gemini_qc.jsonl"
@@ -197,11 +199,160 @@ def _call_gemini_tts_qc(
         )
 
 
+def _call_gemini_tts_qc_with_retries(
+    url: str,
+    model: str,
+    system_instruction: str,
+    user_text: str,
+    audio_b64: str,
+    mime_type: str,
+    *,
+    max_retries: int,
+    base_sleep: float,
+) -> dict[str, Any]:
+    n = max(1, max_retries)
+    sleep_s = base_sleep
+    for attempt in range(n):
+        try:
+            return _call_gemini_tts_qc(
+                url, model, system_instruction, user_text, audio_b64, mime_type
+            )
+        except Exception as e:
+            if attempt < n - 1 and is_retryable_error_message(str(e)):
+                sleep_s = sleep_before_next_attempt(sleep_s)
+                continue
+            raise
+
+
 def _build_user_prompt(plain: str, emotion: str) -> str:
     return S2S_USER_TEMPLATE.format(
         plain_text=plain if plain else "（无）",
         acoustic_emotion=emotion if emotion else "（无）",
     )
+
+
+def _process_tts_manifest_record(
+    rec: dict[str, Any],
+    url: str,
+    *,
+    max_retries: int,
+    base_sleep: float,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """返回 (out_row, 原始 rec, 是否写入 qc_passed)。"""
+    ml = rec.get("manifest_line")
+    turns = rec.get("turns")
+    if not isinstance(turns, list) or not turns:
+        out_row: dict[str, Any] = {
+            "manifest_line": ml,
+            "turns_qc": [],
+            "line_passed": False,
+        }
+        return out_row, rec, False
+
+    turns_qc: list[dict[str, Any]] = []
+    line_ok = True
+
+    for t in turns:
+        if not isinstance(t, dict):
+            line_ok = False
+            continue
+        ti = t.get("turn_index")
+        rel = t.get("tts_audio")
+        plain = (t.get("plain_text") or "").strip()
+        emo = (t.get("acoustic_emotion") or "").strip()
+
+        if not rel or not str(rel).strip():
+            turns_qc.append(
+                {
+                    "turn_index": ti,
+                    "is_pass": False,
+                    "scores": None,
+                    "raw_qc": "",
+                    "error": "missing tts_audio",
+                }
+            )
+            line_ok = False
+            continue
+
+        apath = _resolve_tts_path(str(rel).strip())
+        if not apath.is_file():
+            turns_qc.append(
+                {
+                    "turn_index": ti,
+                    "is_pass": False,
+                    "scores": None,
+                    "raw_qc": "",
+                    "error": f"TTS 文件不存在: {apath}",
+                }
+            )
+            line_ok = False
+            continue
+
+        audio_b64 = base64.standard_b64encode(apath.read_bytes()).decode("ascii")
+        user_text = _build_user_prompt(plain, emo)
+        try:
+            resp = _call_gemini_tts_qc_with_retries(
+                url,
+                _MODEL,
+                S2S_SYSTEM,
+                user_text,
+                audio_b64,
+                _mime_for_path(apath),
+                max_retries=max_retries,
+                base_sleep=base_sleep,
+            )
+        except Exception as exc:  # noqa: BLE001
+            turns_qc.append(
+                {
+                    "turn_index": ti,
+                    "is_pass": False,
+                    "scores": None,
+                    "raw_qc": "",
+                    "error": f"api_error: {exc}",
+                }
+            )
+            line_ok = False
+            continue
+
+        text = _extract_text(resp)
+        if re.search(r"^\[error\]", text.strip()[:80]):
+            turns_qc.append(
+                {
+                    "turn_index": ti,
+                    "is_pass": False,
+                    "scores": None,
+                    "raw_qc": text,
+                    "error": "gemini error payload",
+                }
+            )
+            line_ok = False
+            continue
+
+        parsed = parse_tts_s2s_qc_json_text(text)
+        t_out: dict[str, Any] = {
+            "turn_index": ti,
+            "is_pass": parsed.get("is_pass"),
+            "scores": parsed.get("scores"),
+            "audio_issues": parsed.get("audio_issues", []),
+            "review_summary": parsed.get("review_summary", ""),
+            "raw_qc": text,
+        }
+        pe = parsed.get("parse_error")
+        if pe:
+            t_out["parse_error"] = pe
+        turns_qc.append(t_out)
+        if not is_tts_s2s_qc_passed(parsed):
+            line_ok = False
+
+    if not turns_qc:
+        line_ok = False
+
+    out_row = {
+        "manifest_line": ml,
+        "turns_qc": turns_qc,
+        "line_passed": line_ok,
+    }
+    return out_row, rec, bool(line_ok and turns_qc)
 
 
 def main() -> int:
@@ -218,6 +369,19 @@ def main() -> int:
     ap.add_argument(
         "--limit", type=int, default=0, help="仅处理前 N 条有内容的 manifest 行（0 为不限制）"
     )
+    ap.add_argument("--max-retries", type=int, default=5, help="单次听音 API 最大重试次数")
+    ap.add_argument(
+        "--retry-sleep",
+        type=float,
+        default=1.0,
+        help="首次重试前等待秒数（指数退避）",
+    )
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并行处理的 manifest 行数（默认 1，行内各 turn 仍串行）",
+    )
     args = ap.parse_args()
 
     if not args.input.is_file():
@@ -229,126 +393,63 @@ def main() -> int:
     base = args.base.rstrip("/")
     api_key = _proxy_key()
     url = f"{base}/v1beta/models/{_MODEL}:generateContent?key={api_key}"
-    n = 0
-    n_passed = 0
-    with args.input.open("r", encoding="utf-8") as fin, args.output.open("w", encoding="utf-8") as fout, args.qc_passed_out.open(
-        "w", encoding="utf-8"
-    ) as fpass:
-        for line in tqdm(fin, desc="stage3.5 QC", unit="line"):
+
+    to_run: list[tuple[int, dict[str, Any]]] = []
+    with args.input.open("r", encoding="utf-8") as fin:
+        for line in fin:
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
-            ml = rec.get("manifest_line")
             turns = rec.get("turns")
             if not isinstance(turns, list) or not turns:
                 continue
+            to_run.append((len(to_run), rec))
+            if args.limit and len(to_run) >= args.limit:
+                break
 
-            turns_qc: list[dict[str, Any]] = []
-            line_ok = True
+    workers = max(1, int(args.workers))
+    results: list[tuple[int, dict[str, Any], dict[str, Any], bool]] = []
 
-            for t in turns:
-                if not isinstance(t, dict):
-                    line_ok = False
-                    continue
-                ti = t.get("turn_index")
-                rel = t.get("tts_audio")
-                plain = (t.get("plain_text") or "").strip()
-                emo = (t.get("acoustic_emotion") or "").strip()
+    def _job(item: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any], dict[str, Any], bool]:
+        ord_i, rec = item
+        out_row, src, write_pass = _process_tts_manifest_record(
+            rec,
+            url,
+            max_retries=args.max_retries,
+            base_sleep=args.retry_sleep,
+        )
+        return ord_i, out_row, src, write_pass
 
-                if not rel or not str(rel).strip():
-                    turns_qc.append(
-                        {
-                            "turn_index": ti,
-                            "is_pass": False,
-                            "scores": None,
-                            "raw_qc": "",
-                            "error": "missing tts_audio",
-                        }
-                    )
-                    line_ok = False
-                    continue
+    if to_run:
+        if workers > 1 and len(to_run) > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = [ex.submit(_job, item) for item in to_run]
+                for fut in tqdm(
+                    concurrent.futures.as_completed(futs),
+                    total=len(futs),
+                    desc="stage3.5 QC",
+                    unit="line",
+                ):
+                    results.append(fut.result())
+        else:
+            for item in tqdm(to_run, desc="stage3.5 QC", unit="line"):
+                results.append(_job(item))
 
-                apath = _resolve_tts_path(str(rel).strip())
-                if not apath.is_file():
-                    turns_qc.append(
-                        {
-                            "turn_index": ti,
-                            "is_pass": False,
-                            "scores": None,
-                            "raw_qc": "",
-                            "error": f"TTS 文件不存在: {apath}",
-                        }
-                    )
-                    line_ok = False
-                    continue
-
-                audio_b64 = base64.standard_b64encode(apath.read_bytes()).decode("ascii")
-                user_text = _build_user_prompt(plain, emo)
-                try:
-                    resp = _call_gemini_tts_qc(
-                        url, _MODEL, S2S_SYSTEM, user_text, audio_b64, _mime_for_path(apath)
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    turns_qc.append(
-                        {
-                            "turn_index": ti,
-                            "is_pass": False,
-                            "scores": None,
-                            "raw_qc": "",
-                            "error": f"api_error: {exc}",
-                        }
-                    )
-                    line_ok = False
-                    continue
-
-                text = _extract_text(resp)
-                if re.search(r"^\[error\]", text.strip()[:80]):
-                    turns_qc.append(
-                        {
-                            "turn_index": ti,
-                            "is_pass": False,
-                            "scores": None,
-                            "raw_qc": text,
-                            "error": "gemini error payload",
-                        }
-                    )
-                    line_ok = False
-                    continue
-
-                parsed = parse_tts_s2s_qc_json_text(text)
-                t_out: dict[str, Any] = {
-                    "turn_index": ti,
-                    "is_pass": parsed.get("is_pass"),
-                    "scores": parsed.get("scores"),
-                    "audio_issues": parsed.get("audio_issues", []),
-                    "review_summary": parsed.get("review_summary", ""),
-                    "raw_qc": text,
-                }
-                pe = parsed.get("parse_error")
-                if pe:
-                    t_out["parse_error"] = pe
-                turns_qc.append(t_out)
-                if not is_tts_s2s_qc_passed(parsed):
-                    line_ok = False
-
-            if not turns_qc:
-                line_ok = False
-
-            out_row: dict[str, Any] = {
-                "manifest_line": ml,
-                "turns_qc": turns_qc,
-                "line_passed": line_ok,
-            }
+    results.sort(key=lambda x: x[0])
+    n = 0
+    n_passed = 0
+    with args.output.open("w", encoding="utf-8") as fout, args.qc_passed_out.open(
+        "w", encoding="utf-8"
+    ) as fpass:
+        for _ord_i, out_row, rec, write_pass in results:
             fout.write(json.dumps(out_row, ensure_ascii=False) + "\n")
             _fsync_textio(fout)
             n += 1
-            if line_ok and turns_qc:
+            if write_pass:
                 fpass.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 _fsync_textio(fpass)
                 n_passed += 1
-            if args.limit and n >= args.limit:
-                break
 
     print(f"Stage 3.5 QC 行数={n}，通过={n_passed} -> {args.qc_passed_out}")
     print(f"Wrote {n} rows -> {args.output}")

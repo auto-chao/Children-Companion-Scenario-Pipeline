@@ -43,7 +43,6 @@ import os
 import re
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -73,6 +72,7 @@ import local_api_logger.tracker as _tr
 
 _tr._default_tracker.logger = _lm._default_logger
 from local_api_logger import wrap_requests_call
+from retry_policy import is_retryable_error_message, sleep_before_next_attempt
 
 _DEFAULT_MULTI_IN = _ROOT / "outputs" / "child_dataset" / "manifest.jsonl"
 _DEFAULT_SINGLE_OUT = _ROOT / "outputs" / "assistant_responses_single_turn.jsonl"
@@ -322,18 +322,8 @@ def _call_proxy_with_contents(
                 except Exception:
                     pass
 
-            retryable = (
-                "429" in msg
-                or "resource exhausted" in msg
-                or "quota" in msg
-                or "rate" in msg
-                or "503" in msg
-                or "timeout" in msg
-                or "502" in msg
-            )
-            if attempt < max_retries - 1 and retryable:
-                time.sleep(sleep_s)
-                sleep_s = min(sleep_s * 2, 60.0)
+            if attempt < max_retries - 1 and is_retryable_error_message(msg):
+                sleep_s = sleep_before_next_attempt(sleep_s)
                 continue
             break
 
