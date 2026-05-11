@@ -5,8 +5,19 @@
 #   HF_TOKEN、GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY（Stage2/3.5 等）
 #   MAIN_RUN_STAGE1/2/3=1|0  三阶段总开关（默认 1）
 #   MAIN_MANUAL_ASR_REVIEW=1  在 Qwen 后断点，见 build_child_dataset.sh
-#   ASSISTANT_WORKERS、PYTHON、MAIN_CHILD_LABELS_PATH、MAIN_BUILD_STEP 等
+#   PYTHON、MAIN_CHILD_LABELS_PATH、MAIN_BUILD_STEP 等
 #   COSYVOICE_FORCE_CPU=1  强制 TTS 走 CPU
+#
+# Stage 2（见 run_assistant_responses.sh）：
+#   ASSISTANT_WORKERS（默认 4）、ASSISTANT_RESUME=1|true、ASSISTANT_MAX_PASSES=N
+# Stage 2.5 QC：
+#   QC_GPT54_WORKERS（默认 1；或 QC_STAGE25_WORKERS）、QC_GPT54_RESUME=1|true（或 QC_STAGE25_RESUME）、
+#   QC_GPT54_MAX_PASSES（或 QC_STAGE25_MAX_PASSES）
+# Stage 3 TTS（run_tts.sh 透传）：
+#   TTS_RESUME=1|true（或 COSYVOICE_RESUME）-> 追加 --resume（跳过已存在 wav）
+# Stage 3.5 QC：
+#   QC_TTS_GEMINI_WORKERS（默认 1；或 QC_STAGE35_WORKERS）、QC_TTS_GEMINI_RESUME（或 QC_STAGE35_RESUME）、
+#   QC_TTS_GEMINI_MAX_PASSES（或 QC_STAGE35_MAX_PASSES）
 
 if [ -z "${BASH_VERSION:-}" ]; then
   exec bash "$0" "$@"
@@ -18,6 +29,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 PYTHON="${PYTHON:-python}"
+
+_truthy() {
+  case "${1:-}" in 1|true|True|yes|YES) return 0 ;; *) return 1 ;; esac
+}
 
 RUN1=1
 RUN2=1
@@ -50,11 +65,15 @@ if [ "${RUN2}" = "1" ]; then
     echo "请设置环境变量 GEMINI_PROXY_API_KEY 或 GEMINI_API_KEY。" >&2
     exit 1
   fi
-  bash run_assistant_responses.sh --workers "${ASSISTANT_WORKERS:-4}"
+  bash run_assistant_responses.sh
 
   echo "==> Stage 2.5: QC (GPT-5.4) — 仅通过样本进入 TTS"
   ec2=0
-  "${PYTHON}" scripts/qc/verify_assistant_responses_gpt54.py || ec2=$?
+  _qc25=(--workers "${QC_GPT54_WORKERS:-${QC_STAGE25_WORKERS:-1}}")
+  _truthy "${QC_GPT54_RESUME:-${QC_STAGE25_RESUME:-}}" && _qc25+=(--resume)
+  _mp25="${QC_GPT54_MAX_PASSES:-${QC_STAGE25_MAX_PASSES:-}}"
+  [ -n "${_mp25}" ] && _qc25+=(--max-passes "${_mp25}")
+  "${PYTHON}" scripts/qc/verify_assistant_responses_gpt54.py "${_qc25[@]}" || ec2=$?
   if [ "${ec2}" -ne 0 ]; then
     if [ "${ec2}" -eq 2 ]; then
       echo "Stage 2.5: 有质检样本但 0 条通过，终止流水线（不进入 TTS）。" >&2
@@ -83,15 +102,22 @@ if [[ ! -f "${VENV_UNIX}" && ! -f "${VENV_WIN}" ]]; then
 fi
 
 echo "==> Stage 3: TTS (run_tts.sh; GPU 默认，CPU 请设 COSYVOICE_FORCE_CPU=1)"
+_tts_extra=()
+_truthy "${TTS_RESUME:-${COSYVOICE_RESUME:-}}" && _tts_extra+=(--resume)
 bash run_tts.sh \
   --input outputs/assistant_responses_multiturn.qc_passed.jsonl \
-  --output outputs/assistant_responses_with_tts.jsonl
+  --output outputs/assistant_responses_with_tts.jsonl \
+  "${_tts_extra[@]}"
 
 if [ -z "${GEMINI_PROXY_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ]; then
   echo "未设置 GEMINI 密钥，跳过 Stage 3.5。" >&2
 else
   echo "==> Stage 3.5: QC (gemini-3.1-pro-preview, s2s)"
-  "${PYTHON}" scripts/qc/verify_tts_s2s_gemini.py
+  _qc35=(--workers "${QC_TTS_GEMINI_WORKERS:-${QC_STAGE35_WORKERS:-1}}")
+  _truthy "${QC_TTS_GEMINI_RESUME:-${QC_STAGE35_RESUME:-}}" && _qc35+=(--resume)
+  _mp35="${QC_TTS_GEMINI_MAX_PASSES:-${QC_STAGE35_MAX_PASSES:-}}"
+  [ -n "${_mp35}" ] && _qc35+=(--max-passes "${_mp35}")
+  "${PYTHON}" scripts/qc/verify_tts_s2s_gemini.py "${_qc35[@]}"
 fi
 
 echo "Done."

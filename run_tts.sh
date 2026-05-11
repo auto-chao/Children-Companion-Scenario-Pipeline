@@ -11,6 +11,7 @@
 #
 # 环境变量:
 #   COSYVOICE_FORCE_CPU=1|true|yes  追加 --cpu（与 batch 脚本内 COSYVOICE_FORCE_CPU 一致）
+#   main.sh 还可设 TTS_RESUME=1|true（或 COSYVOICE_RESUME）自动追加 --resume；或直接传参: ./run_tts.sh --resume ...
 #
 # 说明：本脚本固定使用 artifacts/cosyvoice/.venv 中的 Python（CosyVoice 依赖），
 # 与当前是否激活 conda「ccs」无关；请勿依赖 conda 里的 site-packages 跑 CosyVoice。
