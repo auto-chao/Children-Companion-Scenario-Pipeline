@@ -145,7 +145,7 @@ def extract_text_from_generate_content(resp_json: dict[str, Any]) -> str:
         candidates = resp_json.get("candidates", [])
         if candidates:
             parts = candidates[0].get("content", {}).get("parts", [])
-            texts = [p["text"] for p in parts if "text" in p]
+            texts = [p["text"] for p in parts if "text" in p and "thoughtSignature" in p]
             return "\n".join(texts)
     except (KeyError, TypeError, IndexError):
         pass
