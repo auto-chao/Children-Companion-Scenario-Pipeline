@@ -413,6 +413,7 @@ COSYVOICE_FORCE_CPU=1 MAIN_RUN_STAGE1=0 MAIN_RUN_STAGE2=0 bash main.sh
 | `outputs/child_dataset/child_labels.asr.jsonl` | Qwen 机转写 `content` |
 | `outputs/child_dataset/child_labels.filled.jsonl` | 人工校对后（若启用） |
 | `outputs/assistant_responses_multiturn.jsonl` | 助手多轮全量（Stage 2 产物） |
+| `outputs/assistant_responses_multiturn.assistant_state.json` | Stage 2 断点续跑状态（`failed_indices` / `last_pass`）；`generate_assistant_responses.py` 的 `--resume` / `--max-passes` 与 Qwen ASR 状态文件同构 |
 | `outputs/assistant_responses_multiturn.qc_passed.jsonl` | **2.5 通过子集**（与上行 schema 相同；**Stage 3 TTS 唯一输入**） |
 | `outputs/qc/stage2_5_gpt54_qc.jsonl` | Stage 2.5 每行质检详情（`passed` / `raw_qc` / 可选 `parse_error`） |
 | `outputs/tts_generated/*.wav` | 合成音频 |

@@ -29,6 +29,10 @@ GEMINI_PROXY_BASE（可选）
 
 可选参数见 --help。无参数时与 ``--mode multi`` 相同。
 
+续跑与 Qwen ASR 对齐：默认写 ``<output>.assistant_state.json``（``failed_indices`` + ``last_pass``），
+输出按 ``manifest_line`` 整文件重写；``--resume`` 仅补状态中的失败行；``--max-passes`` 多轮只重试仍失败行。
+全量重跑请删除或更换 ``--output`` 与状态文件。
+
 每行 JSON 为 **一个 manifest 样本**，顶层含 ``manifest_line``、``model``、``input_mode``、``turns``（每轮一条）、
 ``line_error``；单轮 ``len(turns)==1``，多轮为多元素数组。
 """
@@ -141,7 +145,7 @@ def extract_text_from_generate_content(resp_json: dict[str, Any]) -> str:
         candidates = resp_json.get("candidates", [])
         if candidates:
             parts = candidates[0].get("content", {}).get("parts", [])
-            texts = [p["text"] for p in parts if "text" in p and "thoughtSignature" in p]
+            texts = [p["text"] for p in parts if "text" in p]
             return "\n".join(texts)
     except (KeyError, TypeError, IndexError):
         pass
@@ -392,31 +396,6 @@ def _build_multiturn_contents(
     ]
 
 
-def _load_done_single_skip(out_path: Path) -> tuple[set[int], set[str]]:
-    """新格式：已写入的 manifest_line；旧格式（无 turns）：顶层 audio。"""
-    done_ml: set[int] = set()
-    done_audio: set[str] = set()
-    if not out_path.is_file():
-        return done_ml, done_audio
-    with out_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            ml = rec.get("manifest_line")
-            if isinstance(ml, int) and isinstance(rec.get("turns"), list):
-                done_ml.add(ml)
-                continue
-            a = rec.get("audio")
-            if isinstance(a, str) and a and "turns" not in rec:
-                done_audio.add(a)
-    return done_ml, done_audio
-
-
 def _load_multiturn_existing_records(out_path: Path) -> dict[int, dict[str, Any]]:
     """manifest 行号 -> 聚合行对象（含 turns）；兼容旧版每轮一行扁平记录。"""
     by_line: dict[int, dict[str, Any]] = {}
@@ -500,6 +479,86 @@ def _multiturn_resume_state(
     return next_t, prior_plain_texts
 
 
+def _default_assistant_state_path(output: Path) -> Path:
+    return output.with_name(output.stem + ".assistant_state.json")
+
+
+def _fsync_textio_global(f: TextIO) -> None:
+    try:
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError:
+        try:
+            f.flush()
+        except OSError:
+            pass
+
+
+def _write_assistant_state(path: Path, *, failed_indices: list[int], last_pass: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"failed_indices": sorted(failed_indices), "last_pass": last_pass}
+    with path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        _fsync_textio_global(f)
+
+
+def _state_failed_snapshot(failed: set[int], batch: set[int], finished: set[int]) -> list[int]:
+    return sorted(failed | (batch - finished))
+
+
+def _read_assistant_state(path: Path) -> tuple[list[int], int]:
+    if not path.is_file():
+        return [], 0
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        print(f"状态文件损坏: {path}: {e}", file=sys.stderr)
+        raise SystemExit(1) from e
+    raw = obj.get("failed_indices") or []
+    if not isinstance(raw, list):
+        print(f"状态文件格式错误: {path} failed_indices", file=sys.stderr)
+        raise SystemExit(1)
+    indices: list[int] = []
+    for x in raw:
+        if isinstance(x, int) and x >= 0:
+            indices.append(x)
+        elif isinstance(x, str) and x.isdigit():
+            indices.append(int(x))
+    last_pass = obj.get("last_pass", 0)
+    if not isinstance(last_pass, int):
+        last_pass = 0
+    return sorted(set(indices)), last_pass
+
+
+def _rewrite_output_from_store(out_path: Path, record_store: dict[int, dict[str, Any]]) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as outf:
+        for ml in sorted(record_store.keys()):
+            outf.write(json.dumps(record_store[ml], ensure_ascii=False) + "\n")
+        _fsync_textio_global(outf)
+
+
+def _manifest_line_needs_work(
+    manifest_line: int,
+    line: str,
+    *,
+    mode: str,
+    record_store: dict[int, dict[str, Any]],
+) -> bool:
+    try:
+        row = json.loads(line)
+    except json.JSONDecodeError:
+        return True
+    if mode == "multi":
+        turns = _turns_from_manifest_row(row)
+        if not turns:
+            return True
+        existing = record_store.get(manifest_line)
+        return _multiturn_resume_state(existing, len(turns)) is not None
+    existing = record_store.get(manifest_line)
+    return _multiturn_resume_state(existing, 1) is not None
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="从 manifest 读取片段，按音频调用代理生成儿童陪伴回复（与 api_call_final 同型）。"
@@ -553,7 +612,24 @@ def main() -> int:
         metavar="N",
         help="仅处理前 N 条 manifest 行（省略则处理全部；可为 0 表示不处理）",
     )
-    p.add_argument("--no-resume", action="store_true", help="不跳过输出文件中已有记录")
+    p.add_argument(
+        "--state-file",
+        type=Path,
+        default=None,
+        help="记录 failed_indices 的 JSON（默认: <output>.assistant_state.json）",
+    )
+    p.add_argument(
+        "--resume",
+        action="store_true",
+        help="仅根据状态文件中的 failed_indices 补跑（需已有 --output）",
+    )
+    p.add_argument(
+        "--max-passes",
+        type=int,
+        default=1,
+        metavar="N",
+        help="最多 N 轮：首轮处理待处理全集，之后每轮仅重试上一轮仍失败的 manifest 行（默认 1）",
+    )
     p.add_argument("--max-retries", type=int, default=5, help="每条请求最大重试次数")
     p.add_argument("--retry-sleep", type=float, default=1.0, help="首次重试前等待秒数（指数退避）")
     p.add_argument(
@@ -568,6 +644,10 @@ def main() -> int:
         help="不显示 tqdm 进度条（便于重定向日志）",
     )
     args = p.parse_args()
+
+    if args.max_passes < 1:
+        print("--max-passes 须 >= 1", file=sys.stderr)
+        return 1
 
     if args.mode == "single" and args.input is None:
         print(
@@ -591,13 +671,15 @@ def main() -> int:
         return 1
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    multiturn_existing: dict[int, dict[str, Any]] = {}
-    if args.mode == "multi" and not args.no_resume:
-        multiturn_existing = _load_multiturn_existing_records(out_path)
-    done_ml: set[int] = set()
-    done_audio: set[str] = set()
-    if args.mode == "single" and not args.no_resume:
-        done_ml, done_audio = _load_done_single_skip(out_path)
+    state_path = (
+        args.state_file
+        if args.state_file is not None
+        else _default_assistant_state_path(out_path)
+    )
+
+    record_store: dict[int, dict[str, Any]] = {}
+    if out_path.is_file():
+        record_store = _load_multiturn_existing_records(out_path)
 
     lines: list[str] = []
     with in_path.open("r", encoding="utf-8") as f:
@@ -619,45 +701,97 @@ def main() -> int:
         print(str(e), file=sys.stderr)
         return 1
 
+    line_by_ml: dict[int, str] = {i + 1: ln for i, ln in enumerate(lines)}
+
+    if args.resume:
+        if not out_path.is_file():
+            print(f"--resume 需要已存在的输出: {out_path}", file=sys.stderr)
+            return 1
+        pending_raw, _ = _read_assistant_state(state_path)
+        pending_list = sorted({p for p in pending_raw if p in line_by_ml})
+        if not pending_list:
+            print("状态文件中无待补 manifest 行，退出")
+            _write_assistant_state(state_path, failed_indices=[], last_pass=0)
+            return 0
+        print(
+            f"--resume: 待补 {len(pending_list)} 行 -> {pending_list[:20]}{'...' if len(pending_list) > 20 else ''}"
+        )
+
     n_ok = n_skip = n_err = 0
     n_api = 0
     workers = max(1, int(args.workers))
     write_lock = threading.Lock()
 
-    def _fsync_textio(f: TextIO) -> None:
-        try:
-            f.flush()
-            os.fsync(f.fileno())
-        except OSError:
-            try:
-                f.flush()
-            except OSError:
-                pass
+    def _run_pass(batch_mls: list[int], pass_no: int) -> set[int]:
+        nonlocal n_ok, n_skip, n_err, n_api, record_store
+        if not batch_mls:
+            return set()
+        batch_set = set(batch_mls)
+        finished: set[int] = set()
+        pass_failed: set[int] = set()
 
-    def _append_output_record(rec: dict[str, Any]) -> None:
-        with write_lock:
-            with out_path.open("a", encoding="utf-8") as outf:
-                outf.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                _fsync_textio(outf)
+        def _accumulate_and_maybe_write(r: dict[str, Any]) -> None:
+            nonlocal n_ok, n_skip, n_err, n_api
+            ml = r.get("manifest_line")
+            if not isinstance(ml, int):
+                return
+            if r.get("message"):
+                print(str(r["message"]), file=sys.stderr)
+            n_api += int(r.get("n_api", 0))
+            st = r.get("status")
+            with write_lock:
+                finished.add(ml)
+                if st == "skip":
+                    n_skip += 1
+                    pass_failed.discard(ml)
+                elif st == "ok":
+                    n_ok += 1
+                    if isinstance(r.get("record"), dict):
+                        record_store[ml] = r["record"]
+                    pass_failed.discard(ml)
+                else:
+                    n_err += 1
+                    if isinstance(r.get("record"), dict):
+                        record_store[ml] = r["record"]
+                    pass_failed.add(ml)
+                snap = _state_failed_snapshot(pass_failed, batch_set, finished)
+                _write_assistant_state(state_path, failed_indices=snap, last_pass=pass_no)
+                _rewrite_output_from_store(out_path, record_store)
 
-    def _accumulate_and_maybe_write(r: dict[str, Any]) -> None:
-        nonlocal n_api, n_ok, n_skip, n_err
-        if r.get("message"):
-            print(str(r["message"]), file=sys.stderr)
-        n_api += int(r.get("n_api", 0))
-        st = r.get("status")
-        if st == "skip":
-            n_skip += 1
-        elif st == "ok":
-            n_ok += 1
-            if isinstance(r.get("record"), dict):
-                _append_output_record(r["record"])
+        inputs: list[tuple[int, str, dict[str, Any] | None]] = [
+            (ml, line_by_ml[ml], record_store.get(ml)) for ml in sorted(batch_mls)
+        ]
+
+        def _dispatch(tup: tuple[int, str, dict[str, Any] | None]) -> dict[str, Any]:
+            ml, ln, ex = tup
+            if args.mode == "single":
+                return _process_single_line(ml, ln, ex)
+            return _process_multi_line(ml, ln, ex)
+
+        if workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = [ex.submit(_dispatch, t) for t in inputs]
+                for fut in tqdm(
+                    concurrent.futures.as_completed(futs),
+                    total=len(futs),
+                    desc=f"assistant {args.mode} pass {pass_no}/{args.max_passes}",
+                    unit="manifest",
+                    disable=args.no_progress,
+                ):
+                    _accumulate_and_maybe_write(fut.result())
         else:
-            n_err += 1
-            if isinstance(r.get("record"), dict):
-                _append_output_record(r["record"])
+            for t in tqdm(
+                inputs,
+                desc=f"assistant {args.mode} pass {pass_no}/{args.max_passes}",
+                unit="manifest",
+                disable=args.no_progress,
+            ):
+                _accumulate_and_maybe_write(_dispatch(t))
+        return set(pass_failed)
 
-    def _process_single_line(manifest_line: int, line: str) -> dict[str, Any]:
+    def _process_single_line(
+        manifest_line: int, line: str, existing: dict[str, Any] | None
+    ) -> dict[str, Any]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError as e:
@@ -679,10 +813,7 @@ def main() -> int:
         audio = row.get("audio", "")
         audio_path = _resolve_audio_path(audio) if isinstance(audio, str) and audio else Path()
 
-        if not args.no_resume and (
-            manifest_line in done_ml
-            or (isinstance(audio, str) and audio and audio in done_audio)
-        ):
+        if _multiturn_resume_state(existing, 1) is None:
             return {
                 "manifest_line": manifest_line,
                 "status": "skip",
@@ -743,7 +874,9 @@ def main() -> int:
                 "message": None,
             }
 
-    def _process_multi_line(manifest_line: int, line: str) -> dict[str, Any]:
+    def _process_multi_line(
+        manifest_line: int, line: str, existing: dict[str, Any] | None
+    ) -> dict[str, Any]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError as e:
@@ -765,21 +898,16 @@ def main() -> int:
                 "message": f"行 {manifest_line}：无可用用户轮次，跳过",
             }
 
-        existing = multiturn_existing.get(manifest_line)
-        if args.no_resume:
-            start_turn = 1
-            prior_plain_texts: list[str] = []
-        else:
-            rs = _multiturn_resume_state(existing, len(turns))
-            if rs is None:
-                return {
-                    "manifest_line": manifest_line,
-                    "status": "skip",
-                    "n_api": 0,
-                    "record": None,
-                    "message": None,
-                }
-            start_turn, prior_plain_texts = rs
+        rs = _multiturn_resume_state(existing, len(turns))
+        if rs is None:
+            return {
+                "manifest_line": manifest_line,
+                "status": "skip",
+                "n_api": 0,
+                "record": None,
+                "message": None,
+            }
+        start_turn, prior_plain_texts = rs
 
         turn_entries: list[dict[str, Any]] = []
         n_api_local = 0
@@ -827,7 +955,7 @@ def main() -> int:
                 break
 
         merged_turns: list[dict[str, Any]] = list(turn_entries)
-        if existing and not args.no_resume:
+        if existing:
             prev_turns = existing.get("turns")
             if isinstance(prev_turns, list) and start_turn > 1:
                 prefix: list[dict[str, Any]] = []
@@ -857,61 +985,48 @@ def main() -> int:
             "message": None,
         }
 
-    if args.mode == "single":
-        inputs = [(i + 1, line) for i, line in enumerate(lines)]
-        if workers > 1:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                futs = [ex.submit(_process_single_line, ml, ln) for ml, ln in inputs]
-                for fut in tqdm(
-                    concurrent.futures.as_completed(futs),
-                    total=len(futs),
-                    desc="assistant single",
-                    unit="manifest",
-                    disable=args.no_progress,
-                ):
-                    _accumulate_and_maybe_write(fut.result())
-        else:
-            for ml, ln in tqdm(
-                inputs,
-                desc="assistant single",
-                unit="manifest",
-                disable=args.no_progress,
-            ):
-                _accumulate_and_maybe_write(_process_single_line(ml, ln))
-
-        print(
-            f"完成：样本成功 {n_ok}，跳过 {n_skip}，样本失败/无效 {n_err}，API 调用 {n_api}，写入 {out_path}"
-        )
-        print(f"API 日志目录：{_API_CALL_ROOT / 'api_logs'}")
-        if n_ok == 0 and n_err > 0:
-            return 1
-        return 0
-
-    # multi：每个 manifest 样本一行 JSON（turns 数组），按行并发；行内轮次串行。
-    inputs = [(i + 1, line) for i, line in enumerate(lines)]
-    if workers > 1:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(_process_multi_line, ml, ln) for ml, ln in inputs]
-            for fut in tqdm(
-                concurrent.futures.as_completed(futs),
-                total=len(futs),
-                desc="assistant multi",
-                unit="manifest",
-                disable=args.no_progress,
-            ):
-                _accumulate_and_maybe_write(fut.result())
+    last_failed: set[int] = set()
+    if args.resume:
+        pass_no = 1
+        current_batch = list(pending_list)
+        while pass_no <= args.max_passes:
+            if not current_batch:
+                break
+            last_failed = _run_pass(current_batch, pass_no)
+            if not last_failed:
+                break
+            pass_no += 1
+            current_batch = sorted(last_failed)
     else:
-        for ml, ln in tqdm(
-            inputs,
-            desc="assistant multi",
-            unit="manifest",
-            disable=args.no_progress,
-        ):
-            _accumulate_and_maybe_write(_process_multi_line(ml, ln))
+        pass_no = 1
+        while pass_no <= args.max_passes:
+            if pass_no == 1:
+                current_batch = [
+                    ml
+                    for ml in sorted(line_by_ml.keys())
+                    if _manifest_line_needs_work(
+                        ml,
+                        line_by_ml[ml],
+                        mode=args.mode,
+                        record_store=record_store,
+                    )
+                ]
+            else:
+                current_batch = sorted(last_failed)
+                if not current_batch:
+                    break
+            last_failed = _run_pass(current_batch, pass_no)
+            if not last_failed:
+                break
+            pass_no += 1
+
+    if not last_failed:
+        _write_assistant_state(state_path, failed_indices=[], last_pass=0)
 
     print(
         f"完成：样本成功 {n_ok}，跳过 {n_skip}，样本失败/无效 {n_err}，API 调用 {n_api}，写入 {out_path}"
     )
+    print(f"状态文件：{state_path}")
     print(f"API 日志目录：{_API_CALL_ROOT / 'api_logs'}")
     if n_ok == 0 and n_err > 0:
         return 1
